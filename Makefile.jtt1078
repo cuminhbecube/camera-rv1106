@@ -1,0 +1,62 @@
+# JT/T 1078 Makefile
+# Build JT/T 1078 protocol implementation
+
+# Cross-compiler path
+CROSS_COMPILE ?= /home/becube/luckfox-pico/tools/linux/toolchain/arm-rockchip830-linux-uclibcgnueabihf/bin/arm-rockchip830-linux-uclibcgnueabihf-
+
+# Compiler and flags
+CC = $(CROSS_COMPILE)gcc
+CFLAGS = -Wall -O2 -Isrc/
+LDFLAGS = -lpthread
+
+# Source files
+PROTOCOL_SRC = src/jtt1078_protocol.c
+EXAMPLE_SRC = src/jtt1078_example.c
+RKIPC_SRC = src/jtt1078_rkipc.c
+
+# Targets
+EXAMPLE_BIN = jtt1078_streaming
+RKIPC_BIN = jtt1078_rkipc
+
+.PHONY: all clean deploy
+
+all: $(EXAMPLE_BIN) $(RKIPC_BIN)
+
+# Build standalone example
+$(EXAMPLE_BIN): $(PROTOCOL_SRC) $(EXAMPLE_SRC)
+	@echo "Building JT/T 1078 example..."
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "✓ Built: $@"
+
+# Build rkipc integration
+$(RKIPC_BIN): $(PROTOCOL_SRC) $(RKIPC_SRC)
+	@echo "Building JT/T 1078 rkipc integration..."
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "✓ Built: $@"
+
+# Clean
+clean:
+	@echo "Cleaning..."
+	rm -f $(EXAMPLE_BIN) $(RKIPC_BIN)
+	@echo "✓ Cleaned"
+
+# Deploy to board
+deploy: all
+	@echo "Deploying to Luckfox Pico Pro..."
+	@./scripts/deploy_jtt1078.sh
+	@echo "✓ Deployed"
+
+# Info
+info:
+	@echo "JT/T 1078 Protocol Implementation"
+	@echo "=================================="
+	@echo "Compiler: $(CC)"
+	@echo "Targets:"
+	@echo "  - $(EXAMPLE_BIN): Standalone test example"
+	@echo "  - $(RKIPC_BIN): rkipc integration"
+	@echo ""
+	@echo "Usage:"
+	@echo "  make              - Build all targets"
+	@echo "  make clean        - Clean build files"
+	@echo "  make deploy       - Build and deploy to board"
+	@echo "  make info         - Show this information"

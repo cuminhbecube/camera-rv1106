@@ -1,0 +1,120 @@
+#!/bin/sh
+#
+# Start rkipc (Rockchip IPC daemon with RTSP) and luckfox_web_config
+#
+
+# Set library path for Rockchip binaries
+export LD_LIBRARY_PATH=/oem/usr/lib:/oem/lib:$LD_LIBRARY_PATH
+export PATH=/oem/usr/bin:/oem/bin:$PATH
+
+case "$1" in
+  start)
+    # Set timezone to Vietnam (UTC+7)
+    # POSIX format: std offset dst [offset],start[/time],end[/time]
+    # For UTC+7 with no DST: ICT-7
+    export TZ='ICT-7'
+    
+    # Ensure SD card recording folder exists
+    if [ -d "/mnt/sdcard" ]; then
+        echo "Creating recording folders on SD card..."
+        mkdir -p /mnt/sdcard/recordings
+        mkdir -p /mnt/sdcard/video1
+        mkdir -p /mnt/sdcard/video2
+        chmod 777 /mnt/sdcard/recordings /mnt/sdcard/video1 /mnt/sdcard/video2 2>/dev/null || true
+    fi
+
+    # Enforce recording configuration in rkipc.ini
+    INI_FILE="/userdata/rkipc.ini"
+    if [ -f "$INI_FILE" ]; then
+        echo "Enforcing recording configuration..."
+        # Ensure mount_path is /mnt/sdcard
+        sed -i 's|^mount_path.*|mount_path = /mnt/sdcard|' "$INI_FILE"
+        # Ensure storage.0 enable is 1
+        # This sed command looks for [storage.0] and then finds the first 'enable =' after it to set it to 1
+        sed -i '/^\[storage\.0\]/,/^\[/ s/^enable[[:space:]]*=.*/enable                         = 1/' "$INI_FILE"
+        # Ensure folder_name is recordings
+        sed -i '/^\[storage\.0\]/,/^\[/ s/^folder_name[[:space:]]*=.*/folder_name                    = recordings/' "$INI_FILE"
+        # Change ALL file_format to ts (handles both "mp4" and "mp4 ; flv,ts" formats)
+        sed -i 's/^file_format[[:space:]]*=.*$/file_format                    = ts/' "$INI_FILE"
+        # CRITICAL: Disable NTP to prevent timezone reset every 60 seconds
+        sed -i '/^\[network\.ntp\]/,/^\[/ s/^enable[[:space:]]*=.*$/enable                         = 0/' "$INI_FILE"
+    fi
+    
+    # Also fix template to prevent it from overwriting our settings
+    TEMPLATE_FILE="/oem/etc/rkipc.ini.template"
+    if [ -f "$TEMPLATE_FILE" ]; then
+        sed -i 's/^file_format[[:space:]]*=.*$/file_format                    = ts/' "$TEMPLATE_FILE"
+        # Disable NTP in template too
+        sed -i '/^\[network\.ntp\]/,/^\[/ s/^enable[[:space:]]*=.*$/enable                         = 0/' "$TEMPLATE_FILE"
+    fi
+    
+    echo "Starting rkipc (RTSP server)..."
+    # Always restart rkipc to ensure config is applied
+    killall rkipc 2>/dev/null || true
+    sleep 2
+    
+    export LD_LIBRARY_PATH=/oem/usr/lib:/oem/lib:$LD_LIBRARY_PATH
+    export TZ='ICT-7'
+    cd /oem && /oem/usr/bin/rkipc -a /oem/usr/share/iqfiles &
+    sleep 3
+    
+    echo "Starting luckfox_web_config..."
+    # Kill any existing instance first
+    killall luckfox_web_config 2>/dev/null || true
+    sleep 1
+    
+    # Start web_config in background with proper environment
+    export LD_LIBRARY_PATH=/oem/usr/lib:/oem/lib:$LD_LIBRARY_PATH
+    /oem/usr/bin/luckfox_web_config &
+    
+    sleep 2
+    
+    echo "Services started:"
+    if pidof luckfox_web_config > /dev/null; then
+        echo "  ✓ Web UI: http://$(ifconfig usb0 2>/dev/null | grep 'inet addr' | cut -d: -f2 | awk '{print $1}' || echo 'BOARD_IP'):8080"
+    else
+        echo "  ✗ Web UI: FAILED TO START"
+    fi
+    
+    if pidof rkipc > /dev/null; then
+        echo "  ✓ RTSP: rtsp://$(ifconfig usb0 2>/dev/null | grep 'inet addr' | cut -d: -f2 | awk '{print $1}' || echo 'BOARD_IP'):554/live/0"
+    else
+        echo "  ✗ RTSP: FAILED TO START"
+    fi
+    ;;
+    
+  stop)
+    echo "Stopping luckfox_web_config..."
+    killall luckfox_web_config 2>/dev/null || true
+    
+    echo "Note: rkipc is system service, not stopping it"
+    echo "To stop rkipc: killall rkipc"
+    ;;
+    
+  restart|reload)
+    "$0" stop
+    sleep 2
+    "$0" start
+    ;;
+    
+  status)
+    echo "=== Service Status ==="
+    if pidof rkipc > /dev/null; then
+        echo "✓ rkipc: RUNNING (PID $(pidof rkipc))"
+    else
+        echo "✗ rkipc: STOPPED"
+    fi
+    
+    if pidof luckfox_web_config > /dev/null; then
+        echo "✓ web_config: RUNNING (PID $(pidof luckfox_web_config))"
+    else
+        echo "✗ web_config: STOPPED"
+    fi
+    ;;
+    
+  *)
+    echo "Usage: $0 {start|stop|restart|status}"
+    exit 1
+esac
+
+exit $?

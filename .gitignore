@@ -1,0 +1,35 @@
+# Build artifacts
+bin/
+build/
+*.o
+*.so
+*.a
+
+# Firmware images (keep only latest)
+update_v2.1_*.img
+!update_v2.1_20251125_011143_78fc2.img
+
+# Logs
+*.log
+wget-log*
+
+# Backup files
+*.backup*
+*.old
+*_new.c
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Binaries (except release)
+luckfox_web_config
+jtt1078_rkipc
+jtt1078_streaming
+video_stream_record
+
+# Test files
+clean_path.py

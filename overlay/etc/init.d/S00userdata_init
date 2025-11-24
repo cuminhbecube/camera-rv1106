@@ -1,0 +1,38 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          userdata_init
+# Required-Start:    
+# Required-Stop:     
+# Default-Start:     S
+# Default-Stop:      
+# Short-Description: Initialize /userdata on first boot
+### END INIT INFO
+
+MARKER="/userdata/.initialized_v2"
+
+case "$1" in
+  start)
+    if [ ! -f "$MARKER" ]; then
+      echo "First boot detected - initializing /userdata..."
+      
+      # Copy rkipc.ini template if it doesn't match expected config
+      if [ -f /oem/etc/rkipc.ini.template ]; then
+        echo "Installing rkipc.ini from template..."
+        cp -f /oem/etc/rkipc.ini.template /userdata/rkipc.ini
+        chmod 644 /userdata/rkipc.ini
+      fi
+      
+      # Create marker file
+      touch "$MARKER"
+      echo "✓ /userdata initialized"
+    else
+      echo "Userdata already initialized"
+    fi
+    ;;
+  *)
+    echo "Usage: $0 {start}" >&2
+    exit 1
+    ;;
+esac
+
+exit 0
