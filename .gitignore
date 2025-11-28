@@ -33,3 +33,4 @@ video_stream_record
 
 # Test files
 clean_path.py
+_codeql_detected_source_root
