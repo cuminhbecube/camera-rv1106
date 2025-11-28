@@ -70,14 +70,30 @@ case "$1" in
     sleep 2
     
     echo "Services started:"
+    IP_USB=$(ifconfig usb0 2>/dev/null | grep 'inet addr' | cut -d: -f2 | awk '{print $1}')
+    IP_ETH=$(ifconfig eth0 2>/dev/null | grep 'inet addr' | cut -d: -f2 | awk '{print $1}')
+    
     if pidof luckfox_web_config > /dev/null; then
-        echo "  ✓ Web UI: http://$(ifconfig usb0 2>/dev/null | grep 'inet addr' | cut -d: -f2 | awk '{print $1}' || echo 'BOARD_IP'):8080"
+        if [ -n "$IP_ETH" ]; then
+            echo "  ✓ Web UI (LAN): http://$IP_ETH:8080"
+        fi
+        if [ -n "$IP_USB" ]; then
+            echo "  ✓ Web UI (USB): http://$IP_USB:8080"
+        fi
+        if [ -z "$IP_ETH" ] && [ -z "$IP_USB" ]; then
+             echo "  ✓ Web UI: http://BOARD_IP:8080"
+        fi
     else
         echo "  ✗ Web UI: FAILED TO START"
     fi
     
     if pidof rkipc > /dev/null; then
-        echo "  ✓ RTSP: rtsp://$(ifconfig usb0 2>/dev/null | grep 'inet addr' | cut -d: -f2 | awk '{print $1}' || echo 'BOARD_IP'):554/live/0"
+        if [ -n "$IP_ETH" ]; then
+            echo "  ✓ RTSP (LAN): rtsp://$IP_ETH:554/live/0"
+        fi
+        if [ -n "$IP_USB" ]; then
+            echo "  ✓ RTSP (USB): rtsp://$IP_USB:554/live/0"
+        fi
     else
         echo "  ✗ RTSP: FAILED TO START"
     fi
