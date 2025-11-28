@@ -590,8 +590,8 @@ height                         = 480
 
 
 [network.ntp]
-enable                         = 0
+enable                         = 1
 refresh_time_s                 = 60
-ntp_server                     = 119.28.183.184
+ntp_server                     = 1.vn.pool.ntp.org
 
 
