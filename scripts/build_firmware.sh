@@ -205,31 +205,10 @@ else
     echo "⚠️  WARNING: rkipc.ini not found"
 fi
 
-# Install timezone file
-echo ""
-echo "[4.4] Installing /etc/TZ and profile.d/timezone.sh..."
-if [[ -f "$PROJECT_ROOT/overlay/etc/TZ" ]]; then
-    cp -f "$PROJECT_ROOT/overlay/etc/TZ" "$ROOTFS/etc/"
-    chmod 644 "$ROOTFS/etc/TZ"
-    echo "✅ Timezone file installed ($(cat "$PROJECT_ROOT/overlay/etc/TZ" | tr -d '\n'))"
-else
-    echo "⚠️  WARNING: /etc/TZ not found"
-fi
-
-# Install timezone auto-loader
-if [[ -f "$PROJECT_ROOT/overlay/etc/profile.d/timezone.sh" ]]; then
-    mkdir -p "$ROOTFS/etc/profile.d"
-    cp -f "$PROJECT_ROOT/overlay/etc/profile.d/timezone.sh" "$ROOTFS/etc/profile.d/"
-    chmod 755 "$ROOTFS/etc/profile.d/timezone.sh"
-    echo "✅ Timezone profile.d script installed"
-else
-    echo "⚠️  WARNING: timezone.sh not found"
-fi
-
 # Install S00userdata_init if exists
 if [[ -f "$PROJECT_ROOT/overlay/etc/init.d/S00userdata_init" ]]; then
     echo ""
-    echo "[4.5] Installing S00userdata_init..."
+    echo "[4.4] Installing S00userdata_init..."
     cp -f "$PROJECT_ROOT/overlay/etc/init.d/S00userdata_init" "$ROOTFS/etc/init.d/"
     chmod +x "$ROOTFS/etc/init.d/S00userdata_init"
     echo "✅ S00userdata_init installed"
@@ -238,7 +217,7 @@ fi
 # Install template to OEM partition
 if [[ -f "$PROJECT_ROOT/overlay/oem/etc/rkipc.ini.template" ]]; then
     echo ""
-    echo "[4.6] Installing rkipc.ini.template to OEM..."
+    echo "[4.5] Installing rkipc.ini.template to OEM..."
     mkdir -p "$OEM_PATH/etc"
     cp -f "$PROJECT_ROOT/overlay/oem/etc/rkipc.ini.template" "$OEM_PATH/etc/"
     chmod 644 "$OEM_PATH/etc/rkipc.ini.template"

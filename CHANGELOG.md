@@ -12,14 +12,13 @@
 - ✅ **Beautiful UI** - Gradient dark blue theme, responsive design, auto-refresh every 5s
 - ✅ **RESTful API** - 4 endpoints: `/api/status`, `/api/control`, `/api/resolution`, `/api/logs`
 
-#### Fixed - All 7 Critical Issues
+#### Fixed - All 6 Critical Issues
 1. ✅ Recording auto-starts after firmware flash (first-boot init script)
 2. ✅ RTSP status shows correctly (real port 554 detection)
-3. ✅ Timezone correct (UTC-7 Vietnam, no more +1h offset)
-4. ✅ Debug logs display working (dmesg parsing)
-5. ✅ Recording restart buttons added (3 control buttons)
-6. ✅ Status display redesigned (modern card-based UI)
-7. ✅ RTSP resolution changeable (via web UI + API)
+3. ✅ Debug logs display working (dmesg parsing)
+4. ✅ Recording restart buttons added (3 control buttons)
+5. ✅ Status display redesigned (modern card-based UI)
+6. ✅ RTSP resolution changeable (via web UI + API)
 
 #### Added - Config Persistence System
 - ✅ **S00userdata_init** - First-boot initialization script

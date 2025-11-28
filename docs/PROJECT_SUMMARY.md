@@ -48,7 +48,6 @@ This document replaces the entire previous docs/ tree. It captures the only info
   - `[storage] mount_path = /mnt/sdcard`
   - `[storage.0] enable = 1`, `folder_name = recordings`, `file_duration = 180`
   - `[rtsp] port = 554`
-  - `[system] timezone = UTC-7` (or change manually)
 - **Recording storage**: `/mnt/sdcard/recordings/*.mp4` (3‑minute segments, auto-rotation handled by rkipc quotas). Init script ensures `recordings`, `video1`, `video2` exist with `0777`.
 - **Logs**: `luckfox_web_config` appends to `/mnt/sdcard/web_status.log` and rotates into `.old` after 2 MB. Kernel/service logs remain in BusyBox `logread`/`dmesg`.
 
