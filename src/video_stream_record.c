@@ -194,7 +194,6 @@ static int RTSP_PORT = DEFAULT_RTSP_PORT;
 static int ENABLE_RTSP = 1;
 static int ENABLE_RECORDING = 1;
 static int ENABLE_TIMESTAMP_OSD = 1;
-static char TIMEZONE[32] = "ICT-7";  // GMT+7
 
 // Status Update Function
 static void update_status_file() {
@@ -250,13 +249,11 @@ static void create_default_config(const char *path) {
     fprintf(f, "enabled = 1\n");
     fprintf(f, "port = %d\n", DEFAULT_RTSP_PORT);
     fprintf(f, "\n[system]\n");
-    fprintf(f, "timezone = %s  # GMT+7\n", TIMEZONE);
     fprintf(f, "timestamp_osd = 1  # Show timestamp on video\n");
     fprintf(f, "\n# Notes:\n");
     fprintf(f, "# - Edit this file to change settings\n");
     fprintf(f, "# - Reboot board for changes to take effect\n");
     fprintf(f, "# - segment_duration: video file length in seconds\n");
-    fprintf(f, "# - timezone: ICT-7 (GMT+7)\n");
     
     fclose(f);
     printf("Created default config file: %s\n", path);
@@ -304,13 +301,6 @@ static void load_config(const char *path) {
             SEGMENT_DURATION = atoi(value);
         } else if (parse_config_line(line, "port", value, sizeof(value))) {
             RTSP_PORT = atoi(value);
-        } else if (parse_config_line(line, "timezone", value, sizeof(value))) {
-            // Trim whitespace and comments
-            char *comment = strchr(value, '#');
-            if (comment) *comment = '\0';
-            char *end = value + strlen(value) - 1;
-            while (end > value && (*end == ' ' || *end == '\t')) *end-- = '\0';
-            strncpy(TIMEZONE, value, sizeof(TIMEZONE) - 1);
         } else if (parse_config_line(line, "enabled", value, sizeof(value))) {
             // Parse enabled based on current section
             int enabled_val = atoi(value);
@@ -329,10 +319,9 @@ static void load_config(const char *path) {
     printf("  Bitrate: %d bps\n", VIDEO_BITRATE);
     printf("  Segment: %d seconds\n", SEGMENT_DURATION);
     printf("  RTSP Port: %d\n", RTSP_PORT);
-    printf("  Timezone: %s\n", TIMEZONE);
     printf("  Recording: %s\n", ENABLE_RECORDING ? "Enabled" : "Disabled");
-    log_message("Config: Res=%dx%d FPS=%d Bitrate=%d Seg=%ds RTSP=%d Rec=%d TZ=%s", 
-        VIDEO_WIDTH, VIDEO_HEIGHT, VIDEO_FPS, VIDEO_BITRATE, SEGMENT_DURATION, RTSP_PORT, ENABLE_RECORDING, TIMEZONE);
+    log_message("Config: Res=%dx%d FPS=%d Bitrate=%d Seg=%ds RTSP=%d Rec=%d", 
+        VIDEO_WIDTH, VIDEO_HEIGHT, VIDEO_FPS, VIDEO_BITRATE, SEGMENT_DURATION, RTSP_PORT, ENABLE_RECORDING);
 }
 
 // Signal handler
@@ -441,7 +430,7 @@ static void *camera_thread(void *arg) {
         // Simulate frame rate
         usleep(1000000 / VIDEO_FPS);
         
-        // Get current time in GMT+7
+        // Get current time
         time_t now = time(NULL);
         struct tm tm_gmt7;
         localtime_r(&now, &tm_gmt7);
@@ -449,7 +438,7 @@ static void *camera_thread(void *arg) {
         // Dummy H.264 NAL unit with timestamp (replace with real MPP output + OSD)
         unsigned char dummy_frame[4096];
         int size = snprintf((char*)dummy_frame, sizeof(dummy_frame),
-                           "FRAME_%06d_TIME_%04d%02d%02d_%02d%02d%02d_GMT+7",
+                           "FRAME_%06d_TIME_%04d%02d%02d_%02d%02d%02d",
                            frame_count,
                            tm_gmt7.tm_year + 1900, tm_gmt7.tm_mon + 1, tm_gmt7.tm_mday,
                            tm_gmt7.tm_hour, tm_gmt7.tm_min, tm_gmt7.tm_sec);
@@ -661,14 +650,10 @@ int main(int argc, char **argv) {
     gpio_set_direction(LED_GPIO_PIN, "out");
     gpio_write(LED_GPIO_PIN, 1); // Turn off initially (Active Low)
     
-    // Step 1: Set timezone to GMT+7
-    setenv("TZ", TIMEZONE, 1);
-    tzset();
-    
     time_t now = time(NULL);
     struct tm tm_local;
     localtime_r(&now, &tm_local);
-    printf("System time (GMT+7): %04d-%02d-%02d %02d:%02d:%02d\n",
+    printf("System time: %04d-%02d-%02d %02d:%02d:%02d\n",
            tm_local.tm_year + 1900, tm_local.tm_mon + 1, tm_local.tm_mday,
            tm_local.tm_hour, tm_local.tm_min, tm_local.tm_sec);
     
@@ -697,7 +682,6 @@ int main(int argc, char **argv) {
     printf("  Segment Duration: %d seconds\n", SEGMENT_DURATION);
     printf("  Record Path: %s\n", RECORD_PATH);
     printf("  Config File: %s\n", CONFIG_FILE_PATH);
-    printf("  Timezone: %s (GMT+7)\n", TIMEZONE);
     printf("  Timestamp OSD: %s\n", ENABLE_TIMESTAMP_OSD ? "Enabled" : "Disabled");
     
     printf("\nNOTE: This is a FRAMEWORK. Real implementation requires:\n");

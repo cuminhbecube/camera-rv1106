@@ -11,7 +11,7 @@
  *   - Real-time status dashboard (uptime, memory, storage, recording counts)
  *   - LED indicators for RTSP stream, recording activity, and SD card health
  *   - Live configuration editing via web interface (safe file locking)
- *   - Timezone-corrected clock display (UTC-8 / PST)
+ *   - Local clock display
  *   - HTTP Basic Authentication for security
  *   - Dark mode UI theme
  * 
@@ -392,7 +392,7 @@ void get_storage(char *buffer) {
  * 
  * Format: "2025-11-24 18:30:45"
  * 
- * Uses system localtime (respects /etc/TZ or system timezone setting)
+ * Uses system localtime
  */
 void get_current_time(char *buffer) {
     time_t now = time(NULL);
@@ -685,8 +685,8 @@ void handle_restart_rkipc(int sock) {
     system("killall rkipc 2>/dev/null");
     sleep(2);
     
-    // Start rkipc with TZ and LD_LIBRARY_PATH
-    system("export TZ='ICT-7' && export LD_LIBRARY_PATH=/oem/usr/lib:/oem/lib:$LD_LIBRARY_PATH && cd /oem && /oem/usr/bin/rkipc -a /oem/usr/share/iqfiles &");
+    // Start rkipc with LD_LIBRARY_PATH
+    system("export LD_LIBRARY_PATH=/oem/usr/lib:/oem/lib:$LD_LIBRARY_PATH && cd /oem && /oem/usr/bin/rkipc -a /oem/usr/share/iqfiles &");
     sleep(3);
     
     // Check if started
@@ -774,7 +774,7 @@ void handle_config_update(int sock, const char *body) {
         sleep(1);
         system("killall rkipc 2>/dev/null");
         sleep(2);
-        system("export TZ='ICT-7' && export LD_LIBRARY_PATH=/oem/usr/lib:/oem/lib:$LD_LIBRARY_PATH && cd /oem && /oem/usr/bin/rkipc -a /oem/usr/share/iqfiles &");
+        system("export LD_LIBRARY_PATH=/oem/usr/lib:/oem/lib:$LD_LIBRARY_PATH && cd /oem && /oem/usr/bin/rkipc -a /oem/usr/share/iqfiles &");
         return;
     } else {
         snprintf(response, sizeof(response), "{\"success\":false,\"error\":\"No valid updates\"}");
@@ -1099,7 +1099,6 @@ int main() {
     }
     
     log_msg("INFO", "Server listening on port %d", WEB_PORT);
-    log_msg("INFO", "Timezone: Using system TZ (should be ICT-7 for Vietnam)");
     
     // Main event loop - accept and handle connections
     while (server_running) {
