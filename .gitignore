@@ -7,7 +7,7 @@ build/
 
 # Firmware images (keep only latest)
 update_v2.1_*.img
-!update_v2.1_20251125_011143_78fc2.img
+!update_v2.1_20251128_235704_8a07c.img
 
 # Logs
 *.log

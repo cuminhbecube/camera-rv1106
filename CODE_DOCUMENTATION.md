@@ -22,7 +22,7 @@ Firmware tùy chỉnh cho camera Luckfox Pico Pro Max (RV1106) với các tính 
 ### 🏗️ Kiến Trúc
 ```
 ┌─────────────────────────────────────────────┐
-│           Web UI (Port 8080)                │
+│           Web UI (Port 5000)                │
 │    (HTML/CSS/JS - Dark Mode)                │
 └────────────────┬────────────────────────────┘
                  │ HTTP/REST API
@@ -394,7 +394,7 @@ ntp_server = 119.28.183.184         # (không dùng)
 
 ### 🌐 Web UI Flow
 ```
-1. Browser → http://172.32.0.93:8080
+1. Browser → http://172.32.0.93:5000
    ↓
 2. luckfox_web_config receives request
    ↓
@@ -619,7 +619,7 @@ unsigned long used_mb = (total_kb - available_kb) / 1024;
 ssh root@172.32.0.93 "ps | grep luckfox_web_config"
 
 # 2. Check port
-ssh root@172.32.0.93 "netstat -tuln | grep 8080"
+ssh root@172.32.0.93 "netstat -tuln | grep 5000"
 
 # 3. Manual start để xem lỗi
 ssh root@172.32.0.93

@@ -50,6 +50,9 @@
 #include <signal.h>
 #include <stdarg.h>
 #include <errno.h>
+#include <pthread.h>
+#include <sys/mman.h>
+#include <fcntl.h>
 
 // ==================================================================================
 // CONFIGURATION CONSTANTS
@@ -212,6 +215,11 @@ int get_rtsp_status() {
  * reflect actual recording state.
  */
 int get_recording_status() {
+    // First check if rkipc is actually running
+    if (!get_rtsp_status()) {
+        return 0;
+    }
+
     DIR *dir = opendir(RECORDING_PATH);
     if (!dir) return 0;
     
@@ -470,8 +478,8 @@ int read_config_value(const char *section, const char *key, char *value, size_t 
  * 
  * Returns: 1 on success, 0 on failure
  * 
- * Uses atomic file replacement with file locking to prevent
- * race conditions and corruption during concurrent access.
+ * Uses atomic file replacement with file locking.
+ * Creates section/key if they don't exist.
  */
 int write_config_value(const char *section, const char *key, const char *new_value) {
     // Lock config file to prevent concurrent writes
@@ -513,25 +521,34 @@ int write_config_value(const char *section, const char *key, const char *new_val
     char line[512];
     char current_section[128] = {0};
     int in_section = 0;
-    int updated = 0;
+    int key_updated = 0;
+    int section_found = 0;
     
     while (fgets(line, sizeof(line), fp)) {
         // Check for section header
         if (line[0] == '[') {
+            // If we were in the target section and didn't find the key, append it before starting new section
+            if (in_section && !key_updated) {
+                fprintf(out, "%s = %s\n", key, new_value);
+                key_updated = 1;
+            }
+
             sscanf(line, "[%127[^]]]", current_section);
             in_section = (strcmp(current_section, section) == 0);
+            if (in_section) section_found = 1;
+            
             fputs(line, out);
             continue;
         }
         
         // If in target section, check if this is the key to update
-        if (in_section && strstr(line, "=")) {
+        if (in_section && !key_updated && strstr(line, "=")) {
             char file_key[128];
             if (sscanf(line, " %127[^ =]", file_key) == 1) {
                 if (strcmp(file_key, key) == 0) {
                     // Replace this line with new value
                     fprintf(out, "%s = %s\n", key, new_value);
-                    updated = 1;
+                    key_updated = 1;
                     continue;
                 }
             }
@@ -541,16 +558,19 @@ int write_config_value(const char *section, const char *key, const char *new_val
         fputs(line, out);
     }
     
+    // Handle end of file cases
+    if (in_section && !key_updated) {
+        // We ended inside the target section but didn't write the key
+        fprintf(out, "%s = %s\n", key, new_value);
+        key_updated = 1;
+    } else if (!section_found) {
+        // Section didn't exist at all, append it
+        fprintf(out, "\n[%s]\n%s = %s\n", section, key, new_value);
+        key_updated = 1;
+    }
+    
     fclose(fp);
     fclose(out);
-    
-    if (!updated) {
-        log_msg("WARN", "Config key [%s]:%s not found in file", section, key);
-        unlink(temp_file);
-        flock(lock_fd, LOCK_UN);
-        close(lock_fd);
-        return 0;
-    }
     
     // Atomically replace original file
     if (rename(temp_file, CONFIG_FILE) != 0) {
@@ -711,8 +731,8 @@ void handle_restart_rkipc(int sock) {
  * 
  * Expected body format: "key1=value1&key2=value2"
  * 
- * Supported keys: storage_enable, folder_name, file_duration, 
- *                 rtsp_enable, width, height, max_rate, output_data_type
+ * CRITICAL: Stops rkipc BEFORE writing to prevent rkipc from overwriting
+ * the config file with old values upon exit.
  */
 void handle_config_update(int sock, const char *body) {
     if (!body || strlen(body) == 0) {
@@ -721,63 +741,75 @@ void handle_config_update(int sock, const char *body) {
         return;
     }
     
-    log_msg("INFO", "Config update request: %s", body);
+    log_msg("INFO", "Config update request received");
+    
+    // Structure to hold pending updates
+    struct {
+        char section[64];
+        char key[64];
+        char value[256];
+    } updates[32];
+    int update_count = 0;
     
     // Parse simple key=value& format
     char body_copy[4096];
     strncpy(body_copy, body, sizeof(body_copy) - 1);
     body_copy[sizeof(body_copy) - 1] = '\0';
     
-    int success_count = 0;
     char *pair = strtok(body_copy, "&");
     
-    while (pair != NULL) {
-        char key[128], value[256];
-        if (sscanf(pair, "%127[^=]=%255s", key, value) == 2) {
-            // Map web keys to INI section/key pairs
-            if (strcmp(key, "storage_enable") == 0) {
-                if (write_config_value("storage.0", "enable", value)) success_count++;
-            }
-            else if (strcmp(key, "folder_name") == 0) {
-                if (write_config_value("storage.0", "folder_name", value)) success_count++;
-            }
-            else if (strcmp(key, "file_duration") == 0) {
-                if (write_config_value("storage.0", "file_duration", value)) success_count++;
-            }
-            else if (strcmp(key, "rtsp_enable") == 0) {
-                if (write_config_value("video.source", "enable_rtsp", value)) success_count++;
-            }
-            else if (strcmp(key, "width") == 0) {
-                if (write_config_value("video.0", "width", value)) success_count++;
-            }
-            else if (strcmp(key, "height") == 0) {
-                if (write_config_value("video.0", "height", value)) success_count++;
-            }
-            else if (strcmp(key, "max_rate") == 0) {
-                if (write_config_value("video.0", "max_rate", value)) success_count++;
-            }
-            else if (strcmp(key, "output_data_type") == 0) {
-                if (write_config_value("video.0", "output_data_type", value)) success_count++;
+    while (pair != NULL && update_count < 32) {
+        char *eq = strchr(pair, '=');
+        if (eq) {
+            *eq = '\0'; // Split key and value
+            char *key = pair;
+            char *value = eq + 1;
+            
+            const char *section = NULL;
+            const char *ini_key = NULL;
+            
+            if (strcmp(key, "storage_enable") == 0) { section="storage.0"; ini_key="enable"; }
+            else if (strcmp(key, "folder_name") == 0) { section="storage.0"; ini_key="folder_name"; }
+            else if (strcmp(key, "file_duration") == 0) { section="storage.0"; ini_key="file_duration"; }
+            else if (strcmp(key, "rtsp_enable") == 0) { section="video.source"; ini_key="enable_rtsp"; }
+            else if (strcmp(key, "width") == 0) { section="video.0"; ini_key="width"; }
+            else if (strcmp(key, "height") == 0) { section="video.0"; ini_key="height"; }
+            else if (strcmp(key, "max_rate") == 0) { section="video.0"; ini_key="max_rate"; }
+            else if (strcmp(key, "output_data_type") == 0) { section="video.0"; ini_key="output_data_type"; }
+            
+            if (section && ini_key) {
+                strncpy(updates[update_count].section, section, 63);
+                strncpy(updates[update_count].key, ini_key, 63);
+                strncpy(updates[update_count].value, value, 255);
+                update_count++;
             }
         }
         pair = strtok(NULL, "&");
     }
     
-    char response[512];
-    if (success_count > 0) {
-        // Send response first
-        snprintf(response, sizeof(response), "{\"success\":true,\"updated\":%d,\"message\":\"Configuration saved. Restarting services...\"}", success_count);
-        send_json(sock, response);
+    if (update_count > 0) {
+        // CRITICAL: Kill rkipc BEFORE writing config to prevent it from overwriting our changes on exit
+        log_msg("INFO", "Stopping rkipc to apply %d updates...", update_count);
+        system("killall -q rkipc");
+        sleep(2); // Give it time to flush and exit
         
-        // Auto-restart rkipc after saving config (async)
-        log_msg("INFO", "Auto-restarting rkipc after config update...");
-        sleep(1);
-        system("killall rkipc 2>/dev/null");
-        sleep(2);
+        // Now write the updates
+        int success_count = 0;
+        for (int i = 0; i < update_count; i++) {
+            if (write_config_value(updates[i].section, updates[i].key, updates[i].value)) {
+                success_count++;
+            }
+        }
+        
+        // Restart rkipc
+        log_msg("INFO", "Restarting rkipc...");
         system("export LD_LIBRARY_PATH=/oem/usr/lib:/oem/lib:$LD_LIBRARY_PATH && cd /oem && /oem/usr/bin/rkipc -a /oem/usr/share/iqfiles &");
-        return;
+        
+        char response[512];
+        snprintf(response, sizeof(response), "{\"success\":true,\"updated\":%d,\"message\":\"Configuration saved and services restarted.\"}", success_count);
+        send_json(sock, response);
     } else {
-        snprintf(response, sizeof(response), "{\"success\":false,\"error\":\"No valid updates\"}");
+        const char *response = "{\"success\":false,\"error\":\"No valid updates found\"}";
         send_json(sock, response);
     }
 }
@@ -1050,6 +1082,101 @@ void handle_request(int client_sock) {
 }
 
 // ==================================================================================
+// LED CONTROL (Standard GPIO)
+// ==================================================================================
+
+// RV1106 GPIO1 Base Address is 0xFF530000
+#define GPIO1_BASE_PHY 0xFF530000
+#define MAP_SIZE 4096UL
+#define MAP_MASK (MAP_SIZE - 1)
+
+// Register Offsets for GPIO V2
+#define GPIO_SWPORT_DR_H  0x0004  // Data Register High (GPIO1_C0 - GPIO1_D7)
+#define GPIO_SWPORT_DDR_H 0x000C  // Data Direction Register High
+
+// GPIO1_C5 (Pin 53) -> Bit 5 in High Register (21 - 16 = 5)
+// GPIO1_C6 (Pin 54) -> Bit 6 in High Register (22 - 16 = 6)
+// GPIO1_C7 (Pin 55) -> Bit 7 in High Register (23 - 16 = 7)
+#define LED1_BIT 5  // Pin 53
+#define LED2_BIT 6  // Pin 54
+#define LED3_BIT 7  // Pin 55
+
+static volatile uint32_t *gpio_base = NULL;
+
+void gpio_setup() {
+    int mem_fd;
+    void *mapped_base;
+
+    if ((mem_fd = open("/dev/mem", O_RDWR | O_SYNC)) == -1) {
+        log_msg("ERROR", "Can't open /dev/mem for LED control");
+        return;
+    }
+
+    mapped_base = mmap(0, MAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, mem_fd, GPIO1_BASE_PHY & ~MAP_MASK);
+    if (mapped_base == (void *) -1) {
+        log_msg("ERROR", "Can't mmap /dev/mem");
+        close(mem_fd);
+        return;
+    }
+
+    gpio_base = (volatile uint32_t *)((char *)mapped_base + (GPIO1_BASE_PHY & MAP_MASK));
+    close(mem_fd);
+
+    // Configure Direction to Output for all 3 LEDs
+    // Format: Upper 16 bits are Write Enable, Lower 16 bits are Value
+    // We want to set bits 5, 6, 7 to 1 (Output)
+    uint32_t val = 0;
+    val |= (1 << (LED1_BIT + 16)) | (1 << LED1_BIT);
+    val |= (1 << (LED2_BIT + 16)) | (1 << LED2_BIT);
+    val |= (1 << (LED3_BIT + 16)) | (1 << LED3_BIT);
+    
+    *(gpio_base + (GPIO_SWPORT_DDR_H / 4)) = val;
+}
+
+void set_led(int bit, int state) {
+    if (!gpio_base) return;
+    
+    // Write to Data Register High
+    // Upper 16 bits are Write Enable, Lower 16 bits are Value
+    uint32_t val = (1 << (bit + 16)) | ((state ? 1 : 0) << bit);
+    *(gpio_base + (GPIO_SWPORT_DR_H / 4)) = val;
+}
+
+void *led_thread_func(void *arg) {
+    log_msg("INFO", "LED Control Thread Started (Standard GPIO)");
+    gpio_setup();
+    if (!gpio_base) return NULL;
+
+    while (server_running) {
+        int rec = get_recording_status();
+        int sd = get_sd_status();
+        int rtsp = get_rtsp_status();
+
+        // LED 1 (Pin 53): Recording Status (On = Recording)
+        set_led(LED1_BIT, rec);
+
+        // LED 2 (Pin 54): SD Card Status (On = OK, Blink = Error/RO)
+        // Simple logic: On if OK (2), Off if Error (0), Blink if RO (1)
+        if (sd == 2) {
+            set_led(LED2_BIT, 1);
+        } else if (sd == 0) {
+            set_led(LED2_BIT, 0);
+        } else {
+            // Blink for Read-Only
+            static int blink = 0;
+            set_led(LED2_BIT, blink);
+            blink = !blink;
+        }
+
+        // LED 3 (Pin 55): RTSP Status (On = Running)
+        set_led(LED3_BIT, rtsp);
+
+        sleep(1); // Update every second
+    }
+    return NULL;
+}
+
+// ==================================================================================
 // MAIN SERVER LOOP
 // ==================================================================================
 
@@ -1068,6 +1195,12 @@ int main() {
     
     log_msg("INFO", "=== Luckfox Camera Web Config v2.0 Starting ===");
     
+    // Start LED Control Thread
+    pthread_t led_tid;
+    if (pthread_create(&led_tid, NULL, led_thread_func, NULL) != 0) {
+        log_msg("ERROR", "Failed to create LED thread");
+    }
+    
     // Create TCP socket
     int server_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (server_sock < 0) {
@@ -1085,10 +1218,16 @@ int main() {
     server_addr.sin_addr.s_addr = INADDR_ANY;
     server_addr.sin_port = htons(WEB_PORT);
     
-    if (bind(server_sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        log_msg("ERROR", "Bind failed on port %d", WEB_PORT);
-        close(server_sock);
-        return 1;
+    int retries = 0;
+    while (bind(server_sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+        log_msg("ERROR", "Bind failed on port %d, retrying in 5s...", WEB_PORT);
+        sleep(5);
+        retries++;
+        if (retries > 10) {
+            log_msg("ERROR", "Failed to bind after 10 attempts. Exiting.");
+            close(server_sock);
+            return 1;
+        }
     }
     
     // Listen for connections

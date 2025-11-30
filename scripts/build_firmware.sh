@@ -48,7 +48,7 @@ fi
 
 # Compile
 echo "Compiling with ARM toolchain..."
-$CC -o luckfox_web_config src/web_config.c -Wall -O2
+$CC -o luckfox_web_config src/web_config.c -Wall -O2 -lpthread
 
 if [[ ! -f "luckfox_web_config" ]]; then
     echo "❌ Compilation failed!"
