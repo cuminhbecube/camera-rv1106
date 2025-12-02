@@ -70,6 +70,59 @@
 #define RECORDING_TIMEOUT 300                  // 5 minutes - max gap for "recording active"
 
 // ==================================================================================
+// UTILITY FUNCTIONS
+// ==================================================================================
+
+/**
+ * trim_string() - Remove leading/trailing whitespace
+ * @str: String to modify in-place
+ */
+void trim_string(char *str) {
+    if (!str) return;
+    
+    // Trim leading
+    char *start = str;
+    while (*start == ' ' || *start == '\t') start++;
+    
+    if (start != str) {
+        memmove(str, start, strlen(start) + 1);
+    }
+    
+    // Trim trailing
+    char *end = str + strlen(str) - 1;
+    while (end >= str && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) end--;
+    *(end + 1) = '\0';
+}
+
+/**
+ * stop_rkipc() - Stop rkipc service and wait for it to exit
+ * 
+ * Ensures rkipc is fully stopped before we modify config files
+ * to prevent race conditions where rkipc overwrites our changes on exit.
+ */
+void stop_rkipc() {
+    log_msg("INFO", "Stopping rkipc...");
+    system("killall -q rkipc");
+    
+    // Wait for process to exit (max 5 seconds)
+    int retries = 0;
+    while (retries < 50) {
+        // Check if rkipc is still running
+        if (system("pgrep rkipc > /dev/null 2>&1") != 0) {
+            // Process is gone
+            return;
+        }
+        usleep(100000); // 100ms
+        retries++;
+    }
+    
+    // If still running, force kill
+    log_msg("WARN", "rkipc did not exit gracefully, forcing kill");
+    system("killall -9 rkipc");
+    usleep(100000);
+}
+
+// ==================================================================================
 // GLOBAL STATE
 // ==================================================================================
 
@@ -270,6 +323,20 @@ int get_recording_count() {
     return count;
 }
 
+// Forward declaration
+int read_config_value(const char *section, const char *key, char *value, size_t value_size);
+
+/**
+ * get_snapshot_status() - Check if periodic snapshots are enabled
+ * 
+ * Returns: 1 if enabled, 0 if disabled
+ */
+int get_snapshot_status() {
+    char value[32] = "0";
+    read_config_value("video.jpeg", "enable_cycle_snapshot", value, sizeof(value));
+    return (atoi(value) == 1) ? 1 : 0;
+}
+
 /**
  * get_sd_status() - Check SD card health and mount status
  * 
@@ -441,6 +508,7 @@ int read_config_value(const char *section, const char *key, char *value, size_t 
         // Check for section header
         if (line[0] == '[') {
             sscanf(line, "[%127[^]]]", current_section);
+            trim_string(current_section);
             in_section = (strcmp(current_section, section) == 0);
             continue;
         }
@@ -448,16 +516,18 @@ int read_config_value(const char *section, const char *key, char *value, size_t 
         // If in target section, look for key
         if (in_section && strstr(line, "=")) {
             char file_key[128], file_value[256];
-            if (sscanf(line, " %127[^ =] = %255[^\r\n]", file_key, file_value) == 2) {
+            // Try to parse key = value
+            char *eq = strchr(line, '=');
+            if (eq) {
+                *eq = '\0'; // Split string
+                strncpy(file_key, line, sizeof(file_key)-1);
+                strncpy(file_value, eq + 1, sizeof(file_value)-1);
+                
+                trim_string(file_key);
+                trim_string(file_value);
+                
                 if (strcmp(file_key, key) == 0) {
-                    // Trim leading/trailing spaces from value
-                    char *start = file_value;
-                    while (*start == ' ') start++;
-                    char *end = start + strlen(start) - 1;
-                    while (end > start && *end == ' ') end--;
-                    *(end + 1) = '\0';
-                    
-                    strncpy(value, start, value_size - 1);
+                    strncpy(value, file_value, value_size - 1);
                     value[value_size - 1] = '\0';
                     fclose(fp);
                     return 1;
@@ -534,6 +604,7 @@ int write_config_value(const char *section, const char *key, const char *new_val
             }
 
             sscanf(line, "[%127[^]]]", current_section);
+            trim_string(current_section);
             in_section = (strcmp(current_section, section) == 0);
             if (in_section) section_found = 1;
             
@@ -544,7 +615,14 @@ int write_config_value(const char *section, const char *key, const char *new_val
         // If in target section, check if this is the key to update
         if (in_section && !key_updated && strstr(line, "=")) {
             char file_key[128];
-            if (sscanf(line, " %127[^ =]", file_key) == 1) {
+            char *eq = strchr(line, '=');
+            if (eq) {
+                char temp_line[512];
+                strcpy(temp_line, line);
+                temp_line[eq - line] = '\0'; // Terminate at equals
+                strncpy(file_key, temp_line, sizeof(file_key)-1);
+                trim_string(file_key);
+                
                 if (strcmp(file_key, key) == 0) {
                     // Replace this line with new value
                     fprintf(out, "%s = %s\n", key, new_value);
@@ -627,6 +705,7 @@ void send_status(int sock) {
         "{\"rtsp_running\":%d,"
         "\"recording_enabled\":%d,"
         "\"sd_status\":%d,"
+        "\"snapshot_enabled\":%d,"
         "\"uptime\":\"%s\","
         "\"memory\":\"%s\","
         "\"storage\":\"%s\","
@@ -635,6 +714,7 @@ void send_status(int sock) {
         get_rtsp_status(),
         get_recording_status(),
         get_sd_status(),
+        get_snapshot_status(),
         uptime,
         memory,
         storage,
@@ -653,9 +733,16 @@ void send_status(int sock) {
  * Includes: storage, recording duration, video resolution, bitrate
  */
 void send_config_data(int sock) {
-    char storage_enable[32], folder_name[256], rtsp_enable[32];
-    char file_duration[32], width[32], height[32], max_rate[32];
-    char output_data_type[32];
+    char storage_enable[32] = "1";
+    char folder_name[256] = "recordings";
+    char rtsp_enable[32] = "1";
+    char file_duration[32] = "120";      // Default 2 minutes (120s)
+    char width[32] = "2304";
+    char height[32] = "1296";
+    char max_rate[32] = "2048";
+    char output_data_type[32] = "H.265";
+    char snapshot_enable[32] = "1";      // Default Enabled
+    char snapshot_interval[32] = "30000"; // Default 30 seconds (30000ms)
     
     // Read storage config
     read_config_value("storage.0", "enable", storage_enable, sizeof(storage_enable));
@@ -668,6 +755,10 @@ void send_config_data(int sock) {
     read_config_value("video.0", "height", height, sizeof(height));
     read_config_value("video.0", "max_rate", max_rate, sizeof(max_rate));
     read_config_value("video.0", "output_data_type", output_data_type, sizeof(output_data_type));
+
+    // Read snapshot config
+    read_config_value("video.jpeg", "enable_cycle_snapshot", snapshot_enable, sizeof(snapshot_enable));
+    read_config_value("video.jpeg", "snapshot_interval_ms", snapshot_interval, sizeof(snapshot_interval));
     
     char json[BUFFER_SIZE];
     snprintf(json, sizeof(json),
@@ -678,7 +769,9 @@ void send_config_data(int sock) {
         "\"width\":\"%s\","
         "\"height\":\"%s\","
         "\"max_rate\":\"%s\","
-        "\"output_data_type\":\"%s\"}",
+        "\"output_data_type\":\"%s\","
+        "\"snapshot_enable\":\"%s\","
+        "\"snapshot_interval\":\"%s\"}",
         storage_enable,
         folder_name,
         file_duration,
@@ -686,10 +779,151 @@ void send_config_data(int sock) {
         width,
         height,
         max_rate,
-        output_data_type
+        output_data_type,
+        snapshot_enable,
+        snapshot_interval
     );
     
     send_json(sock, json);
+}
+
+// Structure for batch updates
+typedef struct {
+    char section[64];
+    char key[64];
+    char value[256];
+    int updated; // Internal flag
+} ConfigEntry;
+
+/**
+ * write_config_batch() - Update multiple values in rkipc.ini efficiently
+ * @entries: Array of ConfigEntry
+ * @count: Number of entries
+ * 
+ * Reads file once, updates all matching keys, handles missing sections/keys.
+ */
+int write_config_batch(ConfigEntry *entries, int count) {
+    int lock_fd = open(CONFIG_FILE, O_RDONLY);
+    if (lock_fd < 0) return 0;
+    
+    if (flock(lock_fd, LOCK_EX) < 0) {
+        close(lock_fd);
+        return 0;
+    }
+    
+    FILE *fp = fopen(CONFIG_FILE, "r");
+    if (!fp) {
+        flock(lock_fd, LOCK_UN);
+        close(lock_fd);
+        return 0;
+    }
+    
+    char temp_file[256];
+    snprintf(temp_file, sizeof(temp_file), "%s.tmp.%d", CONFIG_FILE, getpid());
+    FILE *out = fopen(temp_file, "w");
+    if (!out) {
+        fclose(fp);
+        flock(lock_fd, LOCK_UN);
+        close(lock_fd);
+        return 0;
+    }
+    
+    char line[512];
+    char current_section[128] = {0};
+    int in_section = 0;
+    
+    // Reset updated flags
+    for(int i=0; i<count; i++) entries[i].updated = 0;
+    
+    while (fgets(line, sizeof(line), fp)) {
+        if (line[0] == '[') {
+            // Before switching sections, append any missing keys for the OLD section
+            if (in_section) {
+                for (int i = 0; i < count; i++) {
+                    if (!entries[i].updated && strcmp(entries[i].section, current_section) == 0) {
+                        fprintf(out, "%s = %s\n", entries[i].key, entries[i].value);
+                        entries[i].updated = 1;
+                    }
+                }
+            }
+            
+            sscanf(line, "[%127[^]]]", current_section);
+            trim_string(current_section);
+            in_section = 1;
+            fputs(line, out);
+            continue;
+        }
+        
+        if (in_section && strstr(line, "=")) {
+            char file_key[128];
+            char *eq = strchr(line, '=');
+            if (eq) {
+                char temp_line[512];
+                strcpy(temp_line, line);
+                temp_line[eq - line] = '\0';
+                strncpy(file_key, temp_line, sizeof(file_key)-1);
+                trim_string(file_key);
+                
+                // Check if this key is in our update list for current section
+                int match_idx = -1;
+                for (int i = 0; i < count; i++) {
+                    if (strcmp(entries[i].section, current_section) == 0 && 
+                        strcmp(entries[i].key, file_key) == 0) {
+                        match_idx = i;
+                        break;
+                    }
+                }
+                
+                if (match_idx >= 0) {
+                    fprintf(out, "%s = %s\n", entries[match_idx].key, entries[match_idx].value);
+                    entries[match_idx].updated = 1;
+                    continue;
+                }
+            }
+        }
+        
+        fputs(line, out);
+    }
+    
+    // Handle end of file - append missing keys for last section
+    if (in_section) {
+        for (int i = 0; i < count; i++) {
+            if (!entries[i].updated && strcmp(entries[i].section, current_section) == 0) {
+                fprintf(out, "%s = %s\n", entries[i].key, entries[i].value);
+                entries[i].updated = 1;
+            }
+        }
+    }
+    
+    // Handle completely missing sections
+    for (int i = 0; i < count; i++) {
+        if (!entries[i].updated) {
+            fprintf(out, "\n[%s]\n%s = %s\n", entries[i].section, entries[i].key, entries[i].value);
+            entries[i].updated = 1;
+            
+            // Look ahead for other keys in same section
+            for(int j=i+1; j<count; j++) {
+                if (!entries[j].updated && strcmp(entries[j].section, entries[i].section) == 0) {
+                    fprintf(out, "%s = %s\n", entries[j].key, entries[j].value);
+                    entries[j].updated = 1;
+                }
+            }
+        }
+    }
+    
+    fclose(fp);
+    fclose(out);
+    
+    if (rename(temp_file, CONFIG_FILE) != 0) {
+        unlink(temp_file);
+        flock(lock_fd, LOCK_UN);
+        close(lock_fd);
+        return 0;
+    }
+    
+    flock(lock_fd, LOCK_UN);
+    close(lock_fd);
+    return 1;
 }
 
 /**
@@ -706,7 +940,7 @@ void handle_restart_rkipc(int sock) {
     sleep(2);
     
     // Start rkipc with LD_LIBRARY_PATH
-    system("export LD_LIBRARY_PATH=/oem/usr/lib:/oem/lib:$LD_LIBRARY_PATH && cd /oem && /oem/usr/bin/rkipc -a /oem/usr/share/iqfiles &");
+    system("export LD_LIBRARY_PATH=/oem/usr/lib:/oem/lib:$LD_LIBRARY_PATH && cd /oem && /oem/usr/bin/rkipc -a /oem/usr/share/iqfiles >/dev/null 2>&1 &");
     sleep(3);
     
     // Check if started
@@ -744,11 +978,7 @@ void handle_config_update(int sock, const char *body) {
     log_msg("INFO", "Config update request received");
     
     // Structure to hold pending updates
-    struct {
-        char section[64];
-        char key[64];
-        char value[256];
-    } updates[32];
+    ConfigEntry updates[32];
     int update_count = 0;
     
     // Parse simple key=value& format
@@ -770,12 +1000,26 @@ void handle_config_update(int sock, const char *body) {
             
             if (strcmp(key, "storage_enable") == 0) { section="storage.0"; ini_key="enable"; }
             else if (strcmp(key, "folder_name") == 0) { section="storage.0"; ini_key="folder_name"; }
-            else if (strcmp(key, "file_duration") == 0) { section="storage.0"; ini_key="file_duration"; }
+            else if (strcmp(key, "file_duration") == 0) { 
+                section="storage.0"; 
+                ini_key="file_duration";
+                // Convert minutes to seconds
+                int val = atoi(value);
+                sprintf(value, "%d", val * 60);
+            }
             else if (strcmp(key, "rtsp_enable") == 0) { section="video.source"; ini_key="enable_rtsp"; }
             else if (strcmp(key, "width") == 0) { section="video.0"; ini_key="width"; }
             else if (strcmp(key, "height") == 0) { section="video.0"; ini_key="height"; }
             else if (strcmp(key, "max_rate") == 0) { section="video.0"; ini_key="max_rate"; }
             else if (strcmp(key, "output_data_type") == 0) { section="video.0"; ini_key="output_data_type"; }
+            else if (strcmp(key, "snapshot_enable") == 0) { section="video.jpeg"; ini_key="enable_cycle_snapshot"; }
+            else if (strcmp(key, "snapshot_interval") == 0) { 
+                section="video.jpeg"; 
+                ini_key="snapshot_interval_ms";
+                // Convert seconds to ms
+                int val = atoi(value);
+                sprintf(value, "%d", val * 1000);
+            }
             
             if (section && ini_key) {
                 strncpy(updates[update_count].section, section, 63);
@@ -790,23 +1034,21 @@ void handle_config_update(int sock, const char *body) {
     if (update_count > 0) {
         // CRITICAL: Kill rkipc BEFORE writing config to prevent it from overwriting our changes on exit
         log_msg("INFO", "Stopping rkipc to apply %d updates...", update_count);
-        system("killall -q rkipc");
-        sleep(2); // Give it time to flush and exit
+        stop_rkipc();
         
-        // Now write the updates
-        int success_count = 0;
-        for (int i = 0; i < update_count; i++) {
-            if (write_config_value(updates[i].section, updates[i].key, updates[i].value)) {
-                success_count++;
-            }
-        }
+        // Now write the updates in batch
+        int success = write_config_batch(updates, update_count);
         
         // Restart rkipc
         log_msg("INFO", "Restarting rkipc...");
-        system("export LD_LIBRARY_PATH=/oem/usr/lib:/oem/lib:$LD_LIBRARY_PATH && cd /oem && /oem/usr/bin/rkipc -a /oem/usr/share/iqfiles &");
+        system("export LD_LIBRARY_PATH=/oem/usr/lib:/oem/lib:$LD_LIBRARY_PATH && cd /oem && /oem/usr/bin/rkipc -a /oem/usr/share/iqfiles >/dev/null 2>&1 &");
         
         char response[512];
-        snprintf(response, sizeof(response), "{\"success\":true,\"updated\":%d,\"message\":\"Configuration saved and services restarted.\"}", success_count);
+        if (success) {
+            snprintf(response, sizeof(response), "{\"success\":true,\"updated\":%d,\"message\":\"Configuration saved and services restarted.\"}", update_count);
+        } else {
+            snprintf(response, sizeof(response), "{\"success\":false,\"error\":\"Failed to write config file\"}");
+        }
         send_json(sock, response);
     } else {
         const char *response = "{\"success\":false,\"error\":\"No valid updates found\"}";
@@ -876,19 +1118,20 @@ void send_html(int sock) {
         "<div class='status-item'><span class='label'>RTSP Stream</span><span class='value' id='led-rtsp'><span class='led red'></span>OFF</span></div>\n"
         "<div class='status-item'><span class='label'>Recording</span><span class='value' id='led-rec'><span class='led red'></span>OFF</span></div>\n"
         "<div class='status-item'><span class='label'>SD Card</span><span class='value' id='led-sd'><span class='led red'></span>ERROR</span></div>\n"
+        "<div class='status-item'><span class='label'>Snapshot</span><span class='value' id='led-snap'><span class='led red'></span>OFF</span></div>\n"
         "<button type='button' class='btn' onclick='restartRkipc()' style='margin-top:15px;background:var(--warning)'>🔄 Restart RTSP/Recording</button>\n"
         "</div>\n"
         "</div>\n"
         "<div class='card'>\n"
         "<h2>⚙️ Configuration</h2>\n"
         "<form id='configForm'>\n"
-        "<div class='config-item'>\n"
+        "<div class='config-item' style='display:none'>\n"
         "<label>Recording Folder</label>\n"
         "<input type='text' id='folder_name' name='folder_name' placeholder='recordings'>\n"
         "</div>\n"
         "<div class='config-item'>\n"
-        "<label>Recording Duration (seconds/file)</label>\n"
-        "<input type='number' id='file_duration' name='file_duration' min='10' max='600' step='10' placeholder='180'>\n"
+        "<label>Recording Duration (minutes/file)</label>\n"
+        "<input type='number' id='file_duration' name='file_duration' min='1' max='60' step='1' placeholder='2'>\n"
         "</div>\n"
         "<div class='config-item'>\n"
         "<label>Video Resolution</label>\n"
@@ -900,8 +1143,26 @@ void send_html(int sock) {
         "</select>\n"
         "</div>\n"
         "<div class='config-item'>\n"
-        "<label>Bitrate (kbps)</label>\n"
-        "<input type='number' id='max_rate' name='max_rate' min='512' max='8192' step='128' placeholder='2048'>\n"
+        "<label>Bitrate (kbps) - H.265: 1080p: 1280-1536, 720p: 768-1152</label>\n"
+        "<select id='max_rate' name='max_rate'>\n"
+        "<option value='512'>512</option>\n"
+        "<option value='640'>640</option>\n"
+        "<option value='768'>768</option>\n"
+        "<option value='896'>896</option>\n"
+        "<option value='1024'>1024</option>\n"
+        "<option value='1152'>1152</option>\n"
+        "<option value='1280'>1280</option>\n"
+        "<option value='1408'>1408</option>\n"
+        "<option value='1536'>1536</option>\n"
+        "<option value='1664'>1664</option>\n"
+        "<option value='1792'>1792</option>\n"
+        "<option value='1920'>1920</option>\n"
+        "<option value='2048'>2048</option>\n"
+        "</select>\n"
+        "</div>\n"
+        "<div class='config-item'>\n"
+        "<label>Snapshot Interval (seconds)</label>\n"
+        "<input type='number' id='snapshot_interval' name='snapshot_interval' min='10' max='3600' step='10' placeholder='30'>\n"
         "</div>\n"
         "<div class='config-item' style='display:none'>\n"
         "<select id='storage_enable' name='storage_enable'><option value='1' selected>Enabled</option></select>\n"
@@ -939,16 +1200,18 @@ void send_html(int sock) {
         "if(d.sd_status===2)sd='<span class=\"led green\"></span>OK';\n"
         "else if(d.sd_status===1)sd='<span class=\"led yellow\"></span>READ-ONLY';\n"
         "document.getElementById('led-sd').innerHTML=sd;\n"
+        "document.getElementById('led-snap').innerHTML=(d.snapshot_enabled?'<span class=\"led green\"></span>ON':'<span class=\"led red\"></span>OFF');\n"
         "}\n"
         "async function loadConfig(){\n"
         "const r=await fetch('/api/config');\n"
         "cfg=await r.json();\n"
         "document.getElementById('storage_enable').value=cfg.storage_enable;\n"
         "document.getElementById('folder_name').value=cfg.folder_name;\n"
-        "document.getElementById('file_duration').value=cfg.file_duration;\n"
+        "document.getElementById('file_duration').value=Math.floor(cfg.file_duration/60);\n"
         "document.getElementById('rtsp_enable').value=cfg.rtsp_enable;\n"
         "document.getElementById('max_rate').value=cfg.max_rate;\n"
         "document.getElementById('output_data_type').value=cfg.output_data_type;\n"
+        "document.getElementById('snapshot_interval').value=Math.floor(cfg.snapshot_interval/1000);\n"
         "const res=cfg.width+'x'+cfg.height;\n"
         "document.getElementById('resolution').value=res;\n"
         "}\n"
@@ -1177,6 +1440,65 @@ void *led_thread_func(void *arg) {
 }
 
 // ==================================================================================
+// CONFIGURATION MIGRATION
+// ==================================================================================
+
+/**
+ * check_and_migrate_config() - One-time config migration
+ * 
+ * Ensures new defaults are applied after firmware upgrade.
+ * Uses a marker file to prevent overwriting user changes on subsequent boots.
+ */
+void check_and_migrate_config() {
+    // Check if migration already ran
+    if (access("/userdata/.migrated_v2.1_v8", F_OK) == 0) {
+        return;
+    }
+    
+    log_msg("INFO", "Applying config migration (v2.1 v8)...");
+    
+    // Stop rkipc completely to prevent overwrite
+    stop_rkipc();
+    
+    // Extra wait to ensure rkipc fully stopped and released file handles
+    sleep(2);
+    
+    // Force update to new defaults - using correct section [storage.0]
+    // 1. Storage: Enable recording
+    write_config_value("storage.0", "enable", "1");
+    
+    // 2. Storage: Set folder name  
+    write_config_value("storage.0", "folder_name", "recordings");
+    
+    // 3. Recording Duration: 2 minutes (120s)
+    write_config_value("storage.0", "file_duration", "120");
+    
+    // 4. Periodic Snapshot: Enabled (1) - Default always ON
+    write_config_value("video.jpeg", "enable_cycle_snapshot", "1");
+    
+    // 5. Snapshot Interval: 30 seconds (30000ms) - Safe default
+    write_config_value("video.jpeg", "snapshot_interval_ms", "30000");
+    
+    // Sync filesystem to ensure writes are committed
+    sync();
+    
+    log_msg("INFO", "Config written. Starting rkipc...");
+    
+    // Restart rkipc - MUST restart here since we stopped it
+    system("export LD_LIBRARY_PATH=/oem/usr/lib:/oem/lib:$LD_LIBRARY_PATH && cd /oem && /oem/usr/bin/rkipc -a /oem/usr/share/iqfiles >/dev/null 2>&1 &");
+
+    // Create marker file to mark migration as complete
+    FILE *fp = fopen("/userdata/.migrated_v2.1_v8", "w");
+    if (fp) {
+        fprintf(fp, "migrated=1\n");
+        fclose(fp);
+        log_msg("INFO", "Migration v8 complete. Marker created.");
+    } else {
+        log_msg("ERROR", "Failed to create migration marker");
+    }
+}
+
+// ==================================================================================
 // MAIN SERVER LOOP
 // ==================================================================================
 
@@ -1193,7 +1515,10 @@ int main() {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
     
-    log_msg("INFO", "=== Luckfox Camera Web Config v2.0 Starting ===");
+    log_msg("INFO", "=== Luckfox Camera Web Config v2.1 Starting ===");
+    
+    // Run one-time migration
+    check_and_migrate_config();
     
     // Start LED Control Thread
     pthread_t led_tid;

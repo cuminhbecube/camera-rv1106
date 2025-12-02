@@ -9,10 +9,10 @@ export PATH=/oem/usr/bin:/oem/bin:$PATH
 
 case "$1" in
   start)
-    # Set timezone to Vietnam (UTC+7)
-    # POSIX format: std offset dst [offset],start[/time],end[/time]
-    # For UTC+7 with no DST: ICT-7
-    export TZ='ICT-7'
+    # CRITICAL: Create symlinks from /userdata to SD card to prevent disk full
+    # rkipc always writes to /userdata/recordings even with mount_path=/mnt/sdcard
+    echo "Setting up symlinks for /userdata -> SD card..."
+    rm -rf /userdata/recordings /userdata/video0 /userdata/video1 /userdata/video2 2>/dev/null || true
     
     # Ensure SD card recording folder exists
     if [ -d "/mnt/sdcard" ]; then
@@ -21,6 +21,12 @@ case "$1" in
         mkdir -p /mnt/sdcard/video1
         mkdir -p /mnt/sdcard/video2
         chmod 777 /mnt/sdcard/recordings /mnt/sdcard/video1 /mnt/sdcard/video2 2>/dev/null || true
+        
+        # Create symlinks so any writes to /userdata/recordings go to SD card
+        ln -sf /mnt/sdcard/recordings /userdata/recordings
+        ln -sf /mnt/sdcard/video1 /userdata/video1
+        ln -sf /mnt/sdcard/video2 /userdata/video2
+        echo "Symlinks created: /userdata/recordings -> /mnt/sdcard/recordings"
     fi
 
     # Enforce recording configuration in rkipc.ini
@@ -28,24 +34,35 @@ case "$1" in
     if [ -f "$INI_FILE" ]; then
         echo "Enforcing recording configuration..."
         # Ensure mount_path is /mnt/sdcard
-        sed -i 's|^mount_path.*|mount_path = /mnt/sdcard|' "$INI_FILE"
+        sed -i 's|^mount_path.*|mount_path                     = /mnt/sdcard|' "$INI_FILE"
         # Ensure storage.0 enable is 1
-        # This sed command looks for [storage.0] and then finds the first 'enable =' after it to set it to 1
         sed -i '/^\[storage\.0\]/,/^\[/ s/^enable[[:space:]]*=.*/enable                         = 1/' "$INI_FILE"
         # Ensure folder_name is recordings
         sed -i '/^\[storage\.0\]/,/^\[/ s/^folder_name[[:space:]]*=.*/folder_name                    = recordings/' "$INI_FILE"
-        # Change ALL file_format to ts (handles both "mp4" and "mp4 ; flv,ts" formats)
+        # Set file_duration to 120 seconds (2 minutes)
+        sed -i '/^\[storage\.0\]/,/^\[/ s/^file_duration[[:space:]]*=.*/file_duration                  = 120/' "$INI_FILE"
+        # Auto-delete oldest files when SD card is 95% full (keep up to 100000 files)
+        sed -i '/^\[storage\.0\]/,/^\[/ s/^file_max_num[[:space:]]*=.*/file_max_num                   = 100000/' "$INI_FILE"
+        sed -i '/^\[storage\.0\]/,/^\[/ s/^video_quota[[:space:]]*=.*/video_quota                    = 95/' "$INI_FILE"
+        # Change ALL file_format to ts
         sed -i 's/^file_format[[:space:]]*=.*$/file_format                    = ts/' "$INI_FILE"
-        # CRITICAL: Disable NTP to prevent timezone reset every 60 seconds
-        sed -i '/^\[network\.ntp\]/,/^\[/ s/^enable[[:space:]]*=.*$/enable                         = 0/' "$INI_FILE"
+        # Enable snapshot (video.jpeg section)
+        sed -i '/^\[video\.jpeg\]/,/^\[/ s/^enable_cycle_snapshot[[:space:]]*=.*/enable_cycle_snapshot          = 1/' "$INI_FILE"
+        # Set snapshot interval to 30 seconds (30000ms)
+        sed -i '/^\[video\.jpeg\]/,/^\[/ s/^snapshot_interval_ms[[:space:]]*=.*/snapshot_interval_ms           = 30000/' "$INI_FILE"
+        # Enable NTP and set Vietnam NTP server
+        sed -i '/^\[network\.ntp\]/,/^\[/ s/^enable[[:space:]]*=.*$/enable                         = 1/' "$INI_FILE"
+        sed -i '/^\[network\.ntp\]/,/^\[/ s/^ntp_server[[:space:]]*=.*/ntp_server                     = 1.vn.pool.ntp.org/' "$INI_FILE"
+        sync
     fi
     
     # Also fix template to prevent it from overwriting our settings
     TEMPLATE_FILE="/oem/etc/rkipc.ini.template"
     if [ -f "$TEMPLATE_FILE" ]; then
         sed -i 's/^file_format[[:space:]]*=.*$/file_format                    = ts/' "$TEMPLATE_FILE"
-        # Disable NTP in template too
-        sed -i '/^\[network\.ntp\]/,/^\[/ s/^enable[[:space:]]*=.*$/enable                         = 0/' "$TEMPLATE_FILE"
+        # Enable NTP and set Vietnam NTP server in template too
+        sed -i '/^\[network\.ntp\]/,/^\[/ s/^enable[[:space:]]*=.*$/enable                         = 1/' "$TEMPLATE_FILE"
+        sed -i '/^\[network\.ntp\]/,/^\[/ s/^ntp_server[[:space:]]*=.*/ntp_server                     = 1.vn.pool.ntp.org/' "$TEMPLATE_FILE"
     fi
     
     echo "Starting rkipc (RTSP server)..."
@@ -54,9 +71,24 @@ case "$1" in
     sleep 2
     
     export LD_LIBRARY_PATH=/oem/usr/lib:/oem/lib:$LD_LIBRARY_PATH
-    export TZ='ICT-7'
     cd /oem && /oem/usr/bin/rkipc -a /oem/usr/share/iqfiles &
     sleep 3
+    
+    # CRITICAL: rkipc may overwrite config on startup, so enforce again AFTER it starts
+    # Run in background to not block boot
+    (
+        sleep 5
+        INI_FILE="/userdata/rkipc.ini"
+        if [ -f "$INI_FILE" ]; then
+            sed -i 's|^mount_path.*|mount_path                     = /mnt/sdcard|' "$INI_FILE"
+            sed -i '/^\[storage\.0\]/,/^\[/ s/^enable[[:space:]]*=.*/enable                         = 1/' "$INI_FILE"
+            sed -i '/^\[storage\.0\]/,/^\[/ s/^folder_name[[:space:]]*=.*/folder_name                    = recordings/' "$INI_FILE"
+            sed -i '/^\[storage\.0\]/,/^\[/ s/^file_duration[[:space:]]*=.*/file_duration                  = 120/' "$INI_FILE"
+            sed -i '/^\[video\.jpeg\]/,/^\[/ s/^enable_cycle_snapshot[[:space:]]*=.*/enable_cycle_snapshot          = 1/' "$INI_FILE"
+            sed -i '/^\[video\.jpeg\]/,/^\[/ s/^snapshot_interval_ms[[:space:]]*=.*/snapshot_interval_ms           = 30000/' "$INI_FILE"
+            sync
+        fi
+    ) &
     
     echo "Starting luckfox_web_config..."
     # Kill any existing instance first

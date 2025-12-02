@@ -148,8 +148,8 @@ width                          = 1920
 height                         = 1080
 jpeg_buffer_size               = 1048576
 jpeg_qfactor                   = 70
-enable_cycle_snapshot          = 0
-snapshot_interval_ms           = 1000
+enable_cycle_snapshot          = 1
+snapshot_interval_ms           = 30000
 
 
 [isp]
@@ -337,25 +337,25 @@ num_limit_enable               = 1
 [storage.0]
 enable                         = 1
 folder_name                    = recordings
-file_format                    = ts
-file_duration                  = 180
-video_quota                    = 30
-file_max_num                   = 300
+file_format                    = mp4
+file_duration                  = 120
+video_quota                    = 95
+file_max_num                   = 100000
 
 
 [storage.1]
 enable                         = 0
 folder_name                    = video1
-file_format                    = ts
+file_format                    = mp4
 file_duration                  = 60
-video_quota                    = 30
-file_max_num                   = 300
+video_quota                    = 95
+file_max_num                   = 50000
 
 
 [storage.2]
 enable                         = 0
 folder_name                    = video2
-file_format                    = ts
+file_format                    = mp4
 file_duration                  = 60
 video_quota                    = 30
 file_max_num                   = 300
