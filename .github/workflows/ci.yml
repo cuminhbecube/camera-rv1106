@@ -1,0 +1,56 @@
+name: firmware-monitor-ci
+
+on:
+  push:
+    branches: [main, "fix/**"]
+  pull_request:
+
+jobs:
+  host-safety-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax and strict compile
+        run: |
+          make check
+          make web_config
+          sh -n overlay/etc/init.d/S00userdata_init
+          sh -n overlay/etc/init.d/S99luckfox_video
+          bash -n scripts/build_firmware.sh
+
+      - name: Enforce read-only invariants
+        run: |
+          ! grep -Eq 'handle_config_update|write_config_value|write_config_batch|stop_rkipc|handle_restart_rkipc' src/web_config.c
+          ! grep -Eq 'sed -i|rm -rf[[:space:]]+/userdata/recordings' overlay/etc/init.d/S99luckfox_video
+
+      - name: HTTP smoke and auth robustness
+        run: |
+          ./bin/web_config > /tmp/web_config.stdout 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          sleep 1
+
+          curl -fsS -u admin:luckfox http://127.0.0.1:8080/api/status | python3 -m json.tool >/dev/null
+          curl -fsS -u admin:luckfox http://127.0.0.1:8080/api/logs | python3 -m json.tool >/dev/null
+
+          unauth=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/status)
+          test "$unauth" = "401"
+
+          post=$(curl -sS -o /dev/null -w '%{http_code}' -u admin:luckfox -X POST http://127.0.0.1:8080/api/config)
+          test "$post" = "405"
+
+          python3 - <<'PY'
+          import socket
+          s = socket.create_connection(("127.0.0.1", 8080), timeout=3)
+          token = "A" * 8000
+          req = f"GET /api/status HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic {token}\r\n\r\n"
+          s.sendall(req.encode())
+          first = s.recv(256).split(b"\r\n", 1)[0]
+          s.close()
+          assert first == b"HTTP/1.1 401 Unauthorized", first
+          PY
+
+          kill "$pid"
+          wait "$pid" || true
+          trap - EXIT

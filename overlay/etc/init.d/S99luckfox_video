@@ -1,168 +1,179 @@
 #!/bin/sh
 #
-# Start rkipc (Rockchip IPC daemon with RTSP) and luckfox_web_config
+# Start the Rockchip IPC service and the read-only Luckfox status monitor.
+#
+# Safety rules:
+#   - Never modify /userdata/rkipc.ini here.
+#   - Never delete existing recording directories.
+#   - Never kill a healthy rkipc during a normal "start".
+#   - Refuse to start recording when the SD mount/link layout is unsafe.
 #
 
-# Set library path for Rockchip binaries
 export LD_LIBRARY_PATH=/oem/usr/lib:/oem/lib:$LD_LIBRARY_PATH
 export PATH=/oem/usr/bin:/oem/bin:$PATH
 
+SD_MOUNT="/mnt/sdcard"
+WEB_BIN="/oem/usr/bin/luckfox_web_config"
+RKIPC_BIN="/oem/usr/bin/rkipc"
+IQ_PATH="/oem/usr/share/iqfiles"
+
+is_sd_mounted() {
+    awk -v m="$SD_MOUNT" '$2 == m { found=1 } END { exit(found ? 0 : 1) }' /proc/mounts
+}
+
+ensure_safe_link() {
+    link_path="$1"
+    target_path="$2"
+
+    mkdir -p "$target_path" || return 1
+
+    if [ -L "$link_path" ]; then
+        ln -sfn "$target_path" "$link_path"
+        return $?
+    fi
+
+    if [ -e "$link_path" ]; then
+        if [ -d "$link_path" ] && [ -z "$(ls -A "$link_path" 2>/dev/null)" ]; then
+            rmdir "$link_path" || return 1
+        else
+            echo "WARNING: $link_path contains data; refusing to delete or replace it."
+            echo "Move/recover that data manually, then run: $0 start"
+            return 1
+        fi
+    fi
+
+    ln -s "$target_path" "$link_path"
+}
+
+prepare_storage() {
+    if ! is_sd_mounted; then
+        echo "ERROR: $SD_MOUNT is not mounted; rkipc will not be started."
+        return 1
+    fi
+
+    mkdir -p "$SD_MOUNT/recordings" "$SD_MOUNT/video1" "$SD_MOUNT/video2" || return 1
+    chmod 775 "$SD_MOUNT/recordings" "$SD_MOUNT/video1" "$SD_MOUNT/video2" 2>/dev/null || true
+
+    # recordings is enabled by default and must be safe.
+    ensure_safe_link /userdata/recordings "$SD_MOUNT/recordings" || return 1
+
+    # Secondary streams are normally disabled. Preserve any existing data instead
+    # of forcing/deleting their directories.
+    ensure_safe_link /userdata/video1 "$SD_MOUNT/video1" || true
+    ensure_safe_link /userdata/video2 "$SD_MOUNT/video2" || true
+    return 0
+}
+
+start_rkipc() {
+    if pidof rkipc >/dev/null 2>&1; then
+        echo "rkipc already running (PID $(pidof rkipc))"
+        return 0
+    fi
+
+    if ! prepare_storage; then
+        echo "rkipc start skipped for storage safety."
+        return 1
+    fi
+
+    echo "Starting rkipc..."
+    cd /oem || return 1
+    "$RKIPC_BIN" -a "$IQ_PATH" >/tmp/rkipc.log 2>&1 &
+    sleep 2
+
+    if pidof rkipc >/dev/null 2>&1; then
+        echo "rkipc started (PID $(pidof rkipc))"
+        return 0
+    fi
+
+    echo "ERROR: rkipc failed to start; see /tmp/rkipc.log"
+    return 1
+}
+
+start_web() {
+    if [ ! -x "$WEB_BIN" ]; then
+        echo "ERROR: $WEB_BIN not found or not executable"
+        return 1
+    fi
+
+    if pidof luckfox_web_config >/dev/null 2>&1; then
+        echo "luckfox_web_config already running (PID $(pidof luckfox_web_config))"
+        return 0
+    fi
+
+    echo "Starting read-only web monitor..."
+    "$WEB_BIN" >/tmp/luckfox_web_config.stdout 2>&1 &
+    sleep 1
+
+    if pidof luckfox_web_config >/dev/null 2>&1; then
+        echo "luckfox_web_config started (PID $(pidof luckfox_web_config))"
+        return 0
+    fi
+
+    echo "ERROR: luckfox_web_config failed to start"
+    return 1
+}
+
+stop_web() {
+    if pidof luckfox_web_config >/dev/null 2>&1; then
+        killall luckfox_web_config 2>/dev/null || true
+        sleep 1
+    fi
+}
+
 case "$1" in
   start)
-    # CRITICAL: Create symlinks from /userdata to SD card to prevent disk full
-    # rkipc always writes to /userdata/recordings even with mount_path=/mnt/sdcard
-    echo "Setting up symlinks for /userdata -> SD card..."
-    rm -rf /userdata/recordings /userdata/video0 /userdata/video1 /userdata/video2 2>/dev/null || true
-    
-    # Ensure SD card recording folder exists
-    if [ -d "/mnt/sdcard" ]; then
-        echo "Creating recording folders on SD card..."
-        mkdir -p /mnt/sdcard/recordings
-        mkdir -p /mnt/sdcard/video1
-        mkdir -p /mnt/sdcard/video2
-        chmod 777 /mnt/sdcard/recordings /mnt/sdcard/video1 /mnt/sdcard/video2 2>/dev/null || true
-        
-        # Create symlinks so any writes to /userdata/recordings go to SD card
-        ln -sf /mnt/sdcard/recordings /userdata/recordings
-        ln -sf /mnt/sdcard/video1 /userdata/video1
-        ln -sf /mnt/sdcard/video2 /userdata/video2
-        echo "Symlinks created: /userdata/recordings -> /mnt/sdcard/recordings"
-    fi
+    # Give the kernel/udev/mount scripts a short chance to mount the SD card.
+    retries=0
+    while ! is_sd_mounted && [ "$retries" -lt 10 ]; do
+        sleep 1
+        retries=$((retries + 1))
+    done
 
-    # Enforce recording configuration in rkipc.ini
-    INI_FILE="/userdata/rkipc.ini"
-    if [ -f "$INI_FILE" ]; then
-        echo "Enforcing recording configuration..."
-        # Ensure mount_path is /mnt/sdcard
-        sed -i 's|^mount_path.*|mount_path                     = /mnt/sdcard|' "$INI_FILE"
-        # Ensure storage.0 enable is 1
-        sed -i '/^\[storage\.0\]/,/^\[/ s/^enable[[:space:]]*=.*/enable                         = 1/' "$INI_FILE"
-        # Ensure folder_name is recordings
-        sed -i '/^\[storage\.0\]/,/^\[/ s/^folder_name[[:space:]]*=.*/folder_name                    = recordings/' "$INI_FILE"
-        # Set file_duration to 120 seconds (2 minutes)
-        sed -i '/^\[storage\.0\]/,/^\[/ s/^file_duration[[:space:]]*=.*/file_duration                  = 120/' "$INI_FILE"
-        # Auto-delete oldest files when SD card is 95% full (keep up to 100000 files)
-        sed -i '/^\[storage\.0\]/,/^\[/ s/^file_max_num[[:space:]]*=.*/file_max_num                   = 100000/' "$INI_FILE"
-        sed -i '/^\[storage\.0\]/,/^\[/ s/^video_quota[[:space:]]*=.*/video_quota                    = 95/' "$INI_FILE"
-        # Change ALL file_format to ts
-        sed -i 's/^file_format[[:space:]]*=.*$/file_format                    = ts/' "$INI_FILE"
-        # Enable snapshot (video.jpeg section)
-        sed -i '/^\[video\.jpeg\]/,/^\[/ s/^enable_cycle_snapshot[[:space:]]*=.*/enable_cycle_snapshot          = 1/' "$INI_FILE"
-        # Set snapshot interval to 30 seconds (30000ms)
-        sed -i '/^\[video\.jpeg\]/,/^\[/ s/^snapshot_interval_ms[[:space:]]*=.*/snapshot_interval_ms           = 30000/' "$INI_FILE"
-        # Enable NTP and set Vietnam NTP server
-        sed -i '/^\[network\.ntp\]/,/^\[/ s/^enable[[:space:]]*=.*$/enable                         = 1/' "$INI_FILE"
-        sed -i '/^\[network\.ntp\]/,/^\[/ s/^ntp_server[[:space:]]*=.*/ntp_server                     = 1.vn.pool.ntp.org/' "$INI_FILE"
-        sync
-    fi
-    
-    # Also fix template to prevent it from overwriting our settings
-    TEMPLATE_FILE="/oem/etc/rkipc.ini.template"
-    if [ -f "$TEMPLATE_FILE" ]; then
-        sed -i 's/^file_format[[:space:]]*=.*$/file_format                    = ts/' "$TEMPLATE_FILE"
-        # Enable NTP and set Vietnam NTP server in template too
-        sed -i '/^\[network\.ntp\]/,/^\[/ s/^enable[[:space:]]*=.*$/enable                         = 1/' "$TEMPLATE_FILE"
-        sed -i '/^\[network\.ntp\]/,/^\[/ s/^ntp_server[[:space:]]*=.*/ntp_server                     = 1.vn.pool.ntp.org/' "$TEMPLATE_FILE"
-    fi
-    
-    echo "Starting rkipc (RTSP server)..."
-    # Always restart rkipc to ensure config is applied
-    killall rkipc 2>/dev/null || true
-    sleep 2
-    
-    export LD_LIBRARY_PATH=/oem/usr/lib:/oem/lib:$LD_LIBRARY_PATH
-    cd /oem && /oem/usr/bin/rkipc -a /oem/usr/share/iqfiles &
-    sleep 3
-    
-    # CRITICAL: rkipc may overwrite config on startup, so enforce again AFTER it starts
-    # Run in background to not block boot
-    (
-        sleep 5
-        INI_FILE="/userdata/rkipc.ini"
-        if [ -f "$INI_FILE" ]; then
-            sed -i 's|^mount_path.*|mount_path                     = /mnt/sdcard|' "$INI_FILE"
-            sed -i '/^\[storage\.0\]/,/^\[/ s/^enable[[:space:]]*=.*/enable                         = 1/' "$INI_FILE"
-            sed -i '/^\[storage\.0\]/,/^\[/ s/^folder_name[[:space:]]*=.*/folder_name                    = recordings/' "$INI_FILE"
-            sed -i '/^\[storage\.0\]/,/^\[/ s/^file_duration[[:space:]]*=.*/file_duration                  = 120/' "$INI_FILE"
-            sed -i '/^\[video\.jpeg\]/,/^\[/ s/^enable_cycle_snapshot[[:space:]]*=.*/enable_cycle_snapshot          = 1/' "$INI_FILE"
-            sed -i '/^\[video\.jpeg\]/,/^\[/ s/^snapshot_interval_ms[[:space:]]*=.*/snapshot_interval_ms           = 30000/' "$INI_FILE"
-            sync
-        fi
-    ) &
-    
-    echo "Starting luckfox_web_config..."
-    # Kill any existing instance first
-    killall luckfox_web_config 2>/dev/null || true
-    sleep 1
-    
-    # Start web_config in background with proper environment
-    export LD_LIBRARY_PATH=/oem/usr/lib:/oem/lib:$LD_LIBRARY_PATH
-    /oem/usr/bin/luckfox_web_config &
-    
-    sleep 2
-    
-    echo "Services started:"
-    IP_USB=$(ifconfig usb0 2>/dev/null | grep 'inet addr' | cut -d: -f2 | awk '{print $1}')
-    IP_ETH=$(ifconfig eth0 2>/dev/null | grep 'inet addr' | cut -d: -f2 | awk '{print $1}')
-    
-    if pidof luckfox_web_config > /dev/null; then
-        if [ -n "$IP_ETH" ]; then
-            echo "  ✓ Web UI (LAN): http://$IP_ETH:8080"
-        fi
-        if [ -n "$IP_USB" ]; then
-            echo "  ✓ Web UI (USB): http://$IP_USB:8080"
-        fi
-        if [ -z "$IP_ETH" ] && [ -z "$IP_USB" ]; then
-             echo "  ✓ Web UI: http://BOARD_IP:8080"
-        fi
-    else
-        echo "  ✗ Web UI: FAILED TO START"
-    fi
-    
-    if pidof rkipc > /dev/null; then
-        if [ -n "$IP_ETH" ]; then
-            echo "  ✓ RTSP (LAN): rtsp://$IP_ETH:554/live/0"
-        fi
-        if [ -n "$IP_USB" ]; then
-            echo "  ✓ RTSP (USB): rtsp://$IP_USB:554/live/0"
-        fi
-    else
-        echo "  ✗ RTSP: FAILED TO START"
-    fi
+    start_rkipc || true
+    start_web || exit 1
     ;;
-    
+
   stop)
-    echo "Stopping luckfox_web_config..."
-    killall luckfox_web_config 2>/dev/null || true
-    
-    echo "Note: rkipc is system service, not stopping it"
-    echo "To stop rkipc: killall rkipc"
+    # This init script owns the monitor lifecycle only. Do not kill rkipc here:
+    # stopping the status UI must never interrupt RTSP/recording.
+    stop_web
     ;;
-    
+
   restart|reload)
-    "$0" stop
-    sleep 2
-    "$0" start
+    stop_web
+    start_web
     ;;
-    
+
   status)
     echo "=== Service Status ==="
-    if pidof rkipc > /dev/null; then
-        echo "✓ rkipc: RUNNING (PID $(pidof rkipc))"
+    if pidof rkipc >/dev/null 2>&1; then
+        echo "rkipc: RUNNING (PID $(pidof rkipc))"
     else
-        echo "✗ rkipc: STOPPED"
+        echo "rkipc: STOPPED"
     fi
-    
-    if pidof luckfox_web_config > /dev/null; then
-        echo "✓ web_config: RUNNING (PID $(pidof luckfox_web_config))"
+
+    if pidof luckfox_web_config >/dev/null 2>&1; then
+        echo "luckfox_web_config: RUNNING (PID $(pidof luckfox_web_config))"
     else
-        echo "✗ web_config: STOPPED"
+        echo "luckfox_web_config: STOPPED"
+    fi
+
+    if is_sd_mounted; then
+        echo "SD: MOUNTED at $SD_MOUNT"
+    else
+        echo "SD: NOT MOUNTED"
     fi
     ;;
-    
+
+  start-rkipc)
+    # Recovery helper after inserting/fixing an SD card.
+    start_rkipc
+    ;;
+
   *)
-    echo "Usage: $0 {start|stop|restart|status}"
+    echo "Usage: $0 {start|stop|restart|reload|status|start-rkipc}"
     exit 1
+    ;;
 esac
 
-exit $?
+exit 0

@@ -1,53 +1,29 @@
-# 📊 PROJECT ANALYSIS REPORT
-**Date:** November 23, 2025
-**Version:** 2.1
-**Target:** Luckfox Pico Pro Max (RV1106)
+# Production safety review — resolved items
 
-## 1. Project Status Overview
-The project has successfully transitioned from a basic protocol implementation to a functional firmware with a Web UI. The critical architecture issue (x86-64 vs ARM) has been resolved, and the build process is now automated and robust.
+This file records the issues found in the RV1106 status-monitor review and their current resolution.
 
-| Component | Status | Notes |
-|-----------|--------|-------|
-| **Firmware Build** | ✅ **Stable** | Automated script `build_firmware.sh` handles compilation, cleaning, and packaging. |
-| **Binary Arch** | ✅ **Fixed** | Compiling correctly for ARM 32-bit EABI5. |
-| **Web UI** | ✅ **Working** | Accessible at port 8080. Status, FPS, Logs pages functional. |
-| **API: Status** | ✅ **Working** | Returns system stats (uptime, memory, disk). |
-| **API: FPS** | ✅ **Working** | Can change FPS config (requires manual restart). |
-| **API: Bitrate** | ⚠️ **Disabled** | Code exists but disabled/unstable due to crashes. |
-| **API: Resolution** | ⚠️ **Disabled** | Code exists but disabled/unstable due to crashes. |
-| **Auto-Start** | ✅ **Working** | `S99luckfox_video` script handles startup correctly. |
+| Finding | Resolution |
+|---|---|
+| Full recording-directory scan every second | Replaced with one seed scan + inotify updates |
+| SD create/delete write test every second | Removed; exact `/proc/mounts` check is used |
+| Multiple runtime writers of `rkipc.ini` | Web writes, migration writes and S99 `sed` rewrites removed |
+| Fixed-buffer Authorization overflow | Replaced with bounded in-place comparison |
+| README claimed read-only while POST control existed | POST config/restart removed; docs updated |
+| `/api/logs` documented but missing | Implemented |
+| Shelling out to `netstat`/`ss`/`pgrep` | Replaced with non-blocking loopback RTSP probe |
+| Request logging caused SD writes every 5 s | Normal request logging removed; state-change logging only |
+| Single `recv()` assumed a full HTTP request | Header reader loops until terminator/limit |
+| Single `send()` ignored partial writes | `send_all()` implemented |
+| Mountpoint directory could be mistaken for SD | `/proc/mounts` exact-match detection |
+| Init script could `rm -rf` recording data | Data-destructive removal removed; unsafe path blocks start |
+| Stopping web service could affect video service | Web stop/restart now leaves `rkipc` running |
+| Makefile and production build flags diverged | Unified C11/warnings-as-errors/pthread policy |
+| Test plan described removed/crashing APIs | Replaced with production release-gate tests |
+| Docs hard-coded stale format/duration details | Runtime docs now treat `/userdata/rkipc.ini` as source of truth |
 
-## 2. Critical Issues Resolved
-1.  **Wrong Architecture:** Previously compiled with `gcc` (x86-64) instead of cross-compiler. Fixed by enforcing `arm-rockchip830-linux-uclibcgnueabihf-gcc`.
-2.  **Stale Binary in Firmware:** Buildroot was caching the old binary. Fixed by adding aggressive cleaning steps (`rm -rf rootfs` and `rm -rf sysdrv/out/rootfs`) in the build script.
-3.  **HTTP Timeout:** `system("killall rkipc...")` inside the API handler caused the web server to hang/timeout waiting for the command to finish. Fixed by removing auto-restart (trade-off: requires manual restart).
+## Remaining intentional limitations
 
-## 3. Current & Potential Issues
-
-### 🔴 High Priority (Current Issues)
-*   **UX - Manual Restart Required:** Changing FPS, Bitrate, or Resolution modifies `rkipc.ini` but does not apply changes immediately. The user must manually restart `rkipc` or reboot the board.
-    *   *Recommendation:* Implement a non-blocking restart mechanism (e.g., a separate daemon or `nohup` background task) or add a "Reboot/Apply" button in the Web UI.
-*   **Disabled Features:** Bitrate and Resolution changing is currently disabled or considered unsafe.
-    *   *Recommendation:* Debug `rkipc` crash logs when these values are changed. It might be due to invalid values being written to `rkipc.ini` or `rkipc` not handling dynamic configuration changes gracefully.
-
-### 🟡 Medium Priority (Potential Risks)
-*   **Build Time:** The "Clean Build" approach is safe but slow (rebuilds rootfs every time).
-    *   *Mitigation:* The current script is fine for release builds. For development, a "fast update" script that only updates the binary via SSH would be better (already doing this manually).
-*   **Security:**
-    *   Web server runs as root with no authentication.
-    *   `popen` calls use shell commands. While input validation exists for integers, string inputs (like in `control_recording`) should be strictly validated to prevent command injection.
-*   **Hardcoded Paths:** Scripts and C code use absolute paths (`/home/becube/...`, `/oem/usr/bin/...`).
-    *   *Risk:* If the SDK location changes or partition layout changes, the build/app will break.
-
-### 🟢 Low Priority (Maintenance)
-*   **Documentation Sprawl:** Too many fragmented markdown files (`QUICK_START`, `BUILD_README`, etc.) make it hard to find information.
-    *   *Action:* Consolidating into `PROJECT_DOCS.md`.
-
-## 4. Recommendations for Next Steps
-1.  **Consolidate Documentation:** Merge all guides into one master document (Done in this session).
-2.  **Improve Restart Logic:** Create a helper script `restart_rkipc.sh` that can be called asynchronously by the web server to apply changes without hanging the HTTP request.
-3.  **Enable Bitrate/Resolution:** Test these features with valid values and the new restart logic.
-4.  **Security Hardening:** Add basic HTTP authentication or at least a login page if deployed in untrusted networks.
-
----
-**Analysis by:** GitHub Copilot
+- HTTP Basic Auth is still unencrypted. Use a trusted LAN/VLAN, VPN, or TLS reverse proxy.
+- The monitor is a small single-process embedded HTTP server, not a general-purpose internet-facing web server.
+- GPIO register addresses remain board-specific to the Luckfox Pico Pro Max/RV1106 layout already used by this project.
+- Camera configuration changes are intentionally SSH/offline operations rather than web operations.
