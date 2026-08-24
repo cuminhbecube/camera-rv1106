@@ -55,7 +55,6 @@ require_file "$PROJECT_ROOT/src/web_config.c"
 require_file "$PROJECT_ROOT/overlay/etc/init.d/S00userdata_init"
 require_file "$PROJECT_ROOT/overlay/etc/init.d/S99luckfox_video"
 require_file "$PROJECT_ROOT/overlay/userdata/rkipc.ini"
-require_file "$PROJECT_ROOT/overlay/oem/etc/rkipc.ini.template"
 require_file "$CC"
 require_file "$SDK_PATH/build.sh"
 
@@ -105,7 +104,8 @@ install -m 0755 "$PROJECT_ROOT/overlay/etc/init.d/S99luckfox_video" \
     "$ROOTFS/etc/init.d/S99luckfox_video"
 install -m 0644 "$PROJECT_ROOT/overlay/userdata/rkipc.ini" \
     "$USERDATA/rkipc.ini"
-install -m 0644 "$PROJECT_ROOT/overlay/oem/etc/rkipc.ini.template" \
+# Use one canonical seed config for both the userdata image and first-boot fallback.
+install -m 0644 "$PROJECT_ROOT/overlay/userdata/rkipc.ini" \
     "$OEM_PATH/etc/rkipc.ini.template"
 
 APP_MD5="$(md5sum "$APP_OUT/luckfox_web_config" | awk '{print $1}')"
