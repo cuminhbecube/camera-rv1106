@@ -1,33 +1,35 @@
 #!/bin/sh
-### BEGIN INIT INFO
-# Provides:          userdata_init
-# Required-Start:    
-# Required-Stop:     
-# Default-Start:     S
-# Default-Stop:      
-# Short-Description: Initialize /userdata on first boot
-### END INIT INFO
+#
+# Initialize /userdata exactly once.
+# This script never overwrites an existing camera configuration.
+#
 
 MARKER="/userdata/.initialized_v2"
+CONFIG="/userdata/rkipc.ini"
+TEMPLATE="/oem/etc/rkipc.ini.template"
 
 case "$1" in
   start)
-    if [ ! -f "$MARKER" ]; then
-      echo "First boot detected - initializing /userdata..."
-      
-      # Copy rkipc.ini template if it doesn't match expected config
-      if [ -f /oem/etc/rkipc.ini.template ]; then
-        echo "Installing rkipc.ini from template..."
-        cp -f /oem/etc/rkipc.ini.template /userdata/rkipc.ini
-        chmod 644 /userdata/rkipc.ini
-      fi
-      
-      # Create marker file
-      touch "$MARKER"
-      echo "✓ /userdata initialized"
-    else
+    if [ -f "$MARKER" ]; then
       echo "Userdata already initialized"
+      exit 0
     fi
+
+    if [ -f "$CONFIG" ]; then
+      echo "Existing rkipc.ini found; preserving it"
+    elif [ -f "$TEMPLATE" ]; then
+      echo "Installing initial rkipc.ini from OEM template"
+      cp "$TEMPLATE" "$CONFIG" || exit 1
+      chmod 644 "$CONFIG"
+      sync
+    else
+      echo "ERROR: no $CONFIG and no $TEMPLATE" >&2
+      exit 1
+    fi
+
+    touch "$MARKER" || exit 1
+    sync
+    echo "Userdata initialization complete"
     ;;
   *)
     echo "Usage: $0 {start}" >&2
