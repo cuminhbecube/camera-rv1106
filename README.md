@@ -1,147 +1,97 @@
-# 📘 Luckfox Pico Pro Max - Firmware Project v2.1
+# Luckfox Pico Pro Max Camera Firmware
 
-**Target Board:** Luckfox Pico Pro Max (RV1106)
-**Version:** 2.1
-**Author:** Becube
-**Last Updated:** November 23, 2025
+Production-oriented firmware overlay for the Luckfox Pico Pro Max (RV1106). The camera pipeline remains owned by Rockchip `rkipc`; the custom `luckfox_web_config` process is a **read-only status monitor**.
 
----
+## Safety model
 
-## 📖 Table of Contents
-1. [Project Overview](#1-project-overview)
-2. [Quick Start (Flash & Play)](#2-quick-start-flash--play)
-3. [Build Instructions](#3-build-instructions)
-4. [Web Interface & APIs](#4-web-interface--apis)
-5. [Troubleshooting](#5-troubleshooting)
-6. [Development Notes](#6-development-notes)
+The web monitor intentionally cannot change camera parameters or restart `rkipc`.
 
----
+It exposes only:
 
-> 📄 **Single Source:** detailed build/flash, runtime layout, and troubleshooting notes now live in `docs/PROJECT_SUMMARY.md`. Reference it whenever you need deeper context than this quick README.
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/` | GET | Status dashboard |
+| `/api/status` | GET | Cached system/camera status JSON |
+| `/api/logs` | GET | Recent event log as a JSON array |
+| `/healthz` | GET | 200 when RTSP is up and the SD card is mounted read-write |
 
----
+All other methods return `405 Method Not Allowed`. There is no `/api/config` write path and no `/api/restart`.
 
-## 1. Project Overview
-This project provides a custom firmware for the Luckfox Pico Pro Max. It includes a **safe, read-only** Web Status Monitor (`luckfox_web_config`) that allows users to:
-- View system status (uptime, memory, SD-card usage).
-- Confirm RTSP + recording health with LED indicators.
-- Review persistent debug logs stored on the SD card.
+HTTP Basic Authentication is enabled with the current default credentials `admin` / `luckfox`. HTTP is unencrypted, so deploy the camera only on a trusted LAN/VLAN or behind a VPN/reverse proxy.
 
-The firmware is built using the Luckfox Buildroot SDK and includes automated scripts for compilation and packaging.
+## Monitoring implementation
 
-### Key Features
-- **Web UI:** Port 8080 (Modern, Dark Theme).
-- **RTSP Stream:** Port 554 (Standard `rkipc`).
-- **Architecture:** ARM 32-bit EABI5 (Optimized for RV1106).
-- **Auto-Start:** Services start automatically on boot via `/etc/init.d/S99luckfox_video`.
+The monitor is designed to stay out of the video path:
 
----
+- RTSP health: non-blocking local TCP probe of port 554 every 5 seconds.
+- Recording health: `inotify` events on `/mnt/sdcard/recordings`; no full directory scan every second.
+- Recording count: one initial scan, then event-driven increments/decrements.
+- SD health: exact mount lookup in `/proc/mounts`; no periodic create/delete write-test files.
+- Storage usage: `statvfs()` only after the SD mount is confirmed.
+- System status: cached uptime/memory/time snapshot.
+- LEDs: read cached status only; LED updates do not execute shell commands or touch the SD card.
+- Logging: startup, state transitions and errors only. Ordinary dashboard polling is not logged.
 
-## 2. Quick Start (Flash & Play)
+## Boot ownership
 
-### Step 1: Get the Firmware
-Locate the latest firmware file in the project directory. It follows the naming convention:
-`update_v2.1_YYYYMMDD_HHMMSS_xxxxx.img`
-(where `xxxxx` is the MD5 suffix of the file).
+`/etc/init.d/S00userdata_init` performs one-time userdata initialization and never overwrites an existing `/userdata/rkipc.ini`.
 
-### Step 2: Flash the Firmware
-Use the **SocToolKit** or **RKDevTool** on Windows to flash the `.img` file to your board.
+`/etc/init.d/S99luckfox_video`:
 
-### Step 3: Verify & Access
-1.  **Connect Network:** Ensure the board is connected via Ethernet/USB (RNDIS).
-2.  **Check IP:** Default IP is usually `172.32.0.93` (USB) or assigned via DHCP (Ethernet).
-3.  **Access Web UI:** Open `http://172.32.0.93:8080` in your browser.
-4.  **Verify Binary (Optional):**
-    ```bash
-    ssh root@172.32.0.93 "md5sum /oem/usr/bin/luckfox_web_config"
-    # Expected MD5: b0e6f1931a463e42347938a5404a8674
-    ```
+1. waits briefly for `/mnt/sdcard`;
+2. creates SD recording folders;
+3. creates safe `/userdata/...` symlinks only when it can do so without deleting existing data;
+4. starts `rkipc` only if it is not already running and the recording path is safe;
+5. starts the read-only monitor.
 
----
+The init script does **not** use `sed` to rewrite `rkipc.ini`, does not kill a healthy `rkipc` on normal start, and does not delete a non-empty `/userdata/recordings` directory.
 
-## 3. Build Instructions
+If storage is fixed or inserted after boot:
 
-We use a consolidated script to handle everything: compilation, cleaning, and packaging.
+```sh
+/etc/init.d/S99luckfox_video start-rkipc
+```
 
-### Prerequisites
-- Luckfox SDK installed at `/home/becube/luckfox-pico`.
-- `sudo` access (for cleaning rootfs).
+## Build
 
-### One-Command Build
-Run the following command from the project root:
+Default SDK path:
+
+```text
+/home/becube/luckfox-pico
+```
+
+Override it without editing scripts:
+
+```bash
+SDK_PATH=/path/to/luckfox-pico ./scripts/build_firmware.sh
+```
+
+Build:
 
 ```bash
 ./scripts/build_firmware.sh
 ```
 
-### What the script does:
-1.  **Compiles** `src/web_config.c` using the ARM cross-compiler.
-2.  **Cleans** old rootfs and Buildroot caches to ensure no stale files.
-3.  **Builds** the rootfs using the SDK's `build.sh`.
-4.  **Installs** the new binary and overlay files (init scripts, configs).
-5.  **Packages** the final `update.img`.
-6.  **Renames** the file with a timestamp and MD5 hash.
+The builder compiles `src/web_config.c` with `-std=c11 -O2 -Wall -Wextra -Werror -pthread`, verifies ARM/32-bit output, stages overlays, rebuilds the firmware image, and prints MD5/SHA-256 checksums.
 
----
+For a quick host syntax check:
 
-## 4. Web Interface & APIs
-
-### Web UI
-- **URL:** `http://<BOARD_IP>:8080`
-- **Sections:** Status card, LED card, Logs card.
-- **Auth:** Basic (admin / luckfox).
-
-### REST APIs
-| Endpoint | Method | Description | Example |
-|----------|--------|-------------|---------|
-| `/api/status` | GET | System snapshot | `curl http://.../api/status` |
-| `/api/logs` | GET | Last log lines | `curl http://.../api/logs` |
-
-> Recording control, FPS changes, and other risky actions were removed to keep the device stable. Apply configuration updates manually via `/userdata/rkipc.ini` if needed.
-
----
-
-## 5. Troubleshooting
-
-### Web UI not loading?
-1.  Check if process is running:
-    ```bash
-    ssh root@<IP> "ps aux | grep luckfox_web_config"
-    ```
-2.  Check if port 8080 is open:
-    ```bash
-    ssh root@<IP> "netstat -tuln | grep 8080"
-    ```
-3.  Manually start it to see errors:
-    ```bash
-    ssh root@<IP>
-    killall luckfox_web_config
-    /oem/usr/bin/luckfox_web_config
-    ```
-
-### Firmware flash failed or binary is old?
-- Ensure you are using the latest `.img` file generated by `build_firmware.sh`.
-- Check the MD5 of the binary inside the board (`/oem/usr/bin/luckfox_web_config`). It should be **33KB** (not 42KB).
-
----
-
-## 6. Development Notes
-
-### File Locations on Board
-- **Binary:** `/oem/usr/bin/luckfox_web_config`
-- **Init Script:** `/etc/init.d/S99luckfox_video`
-- **Config:** `/userdata/rkipc.ini`
-- **Logs:** `/tmp/` (system logs)
-
-### Manual Update (Fast Dev Loop)
-Instead of rebuilding the whole firmware, you can just update the binary:
 ```bash
-# 1. Compile (Step 1 inside build script)
-./scripts/build_firmware.sh   # Ctrl+C after compilation if you only need the binary
-
-# 2. Upload
-scp luckfox_web_config root@<IP>:/oem/usr/bin/
-
-# 3. Restart just the monitor
-ssh root@<IP> "killall luckfox_web_config; /oem/usr/bin/luckfox_web_config &"
+make check
 ```
+
+## After flashing
+
+```bash
+ps | grep -E 'rkipc|luckfox_web_config'
+netstat -lnt | grep -E ':554|:8080'
+
+curl -u admin:luckfox http://<ip>:8080/api/status
+curl -u admin:luckfox http://<ip>:8080/api/logs
+
+ffprobe -rtsp_transport tcp rtsp://<ip>:554/live/0
+```
+
+The persistent camera configuration remains `/userdata/rkipc.ini`. Its recording format, duration, bitrate, resolution and other camera parameters are not overridden by the web monitor.
+
+See `docs/PROJECT_SUMMARY.md` and `TEST_PLAN.md` for runtime details and release-gate tests.
